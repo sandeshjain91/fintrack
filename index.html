@@ -1,0 +1,2235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FinTracker – Personal Finance Tracker</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc}
+    ::-webkit-scrollbar{width:5px;height:5px}
+    ::-webkit-scrollbar-track{background:#f1f5f9}
+    ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+
+const {useState, useEffect, useMemo} = React;
+
+/* ─── Helpers ─── */
+const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#06b6d4","#84cc16"];
+const DEF_CATS = ["Food","Shopping","Transport","Travel","Bills","Healthcare","Education","Entertainment","Rent","Subscriptions","Insurance","Miscellaneous","Salary","Freelance","Interest","Dividend","Gift","Refund"];
+const AUTO_RULES = {amazon:"Shopping",flipkart:"Shopping",uber:"Transport",ola:"Transport",swiggy:"Food",zomato:"Food",netflix:"Subscriptions",spotify:"Subscriptions",electricity:"Bills",airtel:"Bills",jio:"Bills",rent:"Rent",hospital:"Healthcare",pharmacy:"Healthcare",school:"Education",udemy:"Education"};
+
+const ls  = (k,d) => { try { const v = localStorage.getItem("ft_"+k); return v ? JSON.parse(v) : d; } catch { return d; } };
+const ss  = (k,v) => localStorage.setItem("ft_"+k, JSON.stringify(v));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const fmt = n  => new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format(n||0);
+const fd  = d  => d ? new Date(d).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}) : "—";
+const mk  = d  => (d||"").slice(0,7);
+const tod = () => new Date().toISOString().slice(0,10);
+const autoCat = desc => { const d=(desc||"").toLowerCase(); for(const[k,v] of Object.entries(AUTO_RULES)){if(d.includes(k))return v;} return "Miscellaneous"; };
+
+/* ─── SVG Charts ─── */
+function PieChart({data, donut=false, size=260}) {
+  if(!data||!data.length) return <div className="text-gray-400 text-center py-12 text-sm">No data yet</div>;
+  const total = data.reduce((s,d)=>s+d.value,0);
+  if(!total) return <div className="text-gray-400 text-center py-12 text-sm">No data yet</div>;
+  const cx=size/2, cy=size/2, r=size*0.34, ir=donut?size*0.18:0;
+  let ang = -Math.PI/2;
+  const slices = data.map((d,i)=>{
+    const theta = (d.value/total)*2*Math.PI;
+    const ea = ang+theta; const ma = ang+theta/2;
+    const x1=cx+r*Math.cos(ang), y1=cy+r*Math.sin(ang);
+    const x2=cx+r*Math.cos(ea),  y2=cy+r*Math.sin(ea);
+    const ix1=cx+ir*Math.cos(ea), iy1=cy+ir*Math.sin(ea);
+    const ix2=cx+ir*Math.cos(ang),iy2=cy+ir*Math.sin(ang);
+    const lg = theta>Math.PI?1:0;
+    const path = donut
+      ? `M${x1} ${y1} A${r} ${r} 0 ${lg} 1 ${x2} ${y2} L${ix1} ${iy1} A${ir} ${ir} 0 ${lg} 0 ${ix2} ${iy2} Z`
+      : `M${cx} ${cy} L${x1} ${y1} A${r} ${r} 0 ${lg} 1 ${x2} ${y2} Z`;
+    const lx=cx+(r+22)*Math.cos(ma), ly=cy+(r+22)*Math.sin(ma);
+    const pct = (d.value/total*100).toFixed(0);
+    ang=ea;
+    return {path, color:COLORS[i%COLORS.length], lx, ly, name:d.name, pct};
+  });
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" style={{maxHeight:size}}>
+      {slices.map((s,i)=><path key={i} d={s.path} fill={s.color} stroke="#fff" strokeWidth="1.5"/>)}
+      {slices.map((s,i)=>(
+        <text key={i} x={s.lx} y={s.ly} textAnchor="middle" fontSize="9.5" fill="#374151" fontWeight="500">
+          <tspan x={s.lx} dy="0">{s.name}</tspan>
+          <tspan x={s.lx} dy="12">{s.pct}%</tspan>
+        </text>
+      ))}
+    </svg>
+  );
+}
+
+function BarChart({data, keys, colors, height=220}) {
+  if(!data||!data.length) return <div className="text-gray-400 text-center py-10 text-sm">No data yet</div>;
+  const allVals = data.flatMap(d=>keys.map(k=>d[k]||0));
+  const max = Math.max(...allVals, 1);
+  const W=560, H=height, pad={t:16,b:40,l:55,r:10};
+  const bW=(W-pad.l-pad.r)/data.length;
+  const bGap=4;
+  const bInner=(bW-bGap*2)/keys.length - 2;
+  const yTick = v => { const a=v/1000; return a>=1?`₹${a.toFixed(0)}k`:`₹${v}`; };
+  const ySteps = [0,0.25,0.5,0.75,1].map(f=>Math.round(f*max));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%">
+      {ySteps.map((v,i)=>{
+        const y = pad.t + (H-pad.t-pad.b)*(1-v/max);
+        return <g key={i}>
+          <line x1={pad.l} x2={W-pad.r} y1={y} y2={y} stroke="#e5e7eb" strokeWidth="1"/>
+          <text x={pad.l-6} y={y+4} textAnchor="end" fontSize="10" fill="#9ca3af">{yTick(v)}</text>
+        </g>;
+      })}
+      {data.map((d,di)=>{
+        const x0 = pad.l + di*bW + bGap;
+        return <g key={di}>
+          {keys.map((k,ki)=>{
+            const val = d[k]||0;
+            const bh = val/max*(H-pad.t-pad.b);
+            const bx = x0 + ki*(bInner+2);
+            const by = pad.t+(H-pad.t-pad.b)-bh;
+            return <g key={ki}>
+              <rect x={bx} y={by} width={bInner} height={bh} fill={colors[ki]} rx="3"/>
+            </g>;
+          })}
+          <text x={x0+bW/2-bGap} y={H-pad.b+14} textAnchor="middle" fontSize="10" fill="#6b7280">{d.name}</text>
+        </g>;
+      })}
+      {/* Legend */}
+      {keys.map((k,i)=>(
+        <g key={i} transform={`translate(${pad.l + i*90}, ${H-12})`}>
+          <rect width="10" height="10" fill={colors[i]} rx="2"/>
+          <text x="14" y="9" fontSize="10" fill="#374151" textTransform="capitalize">{k}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+/* ─── UI Primitives ─── */
+function Modal({open, onClose, title, children}) {
+  if(!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{background:"rgba(0,0,0,.45)"}} onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <h2 className="text-base font-semibold text-gray-800">{title}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl leading-none w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100">&times;</button>
+        </div>
+        <div className="px-6 py-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function F({label, children}) {
+  return <div className="mb-3"><label className="block text-xs font-medium text-gray-500 mb-1">{label}</label>{children}</div>;
+}
+const inp = "w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 transition";
+const btnP = "bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition";
+const btnS = "bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition";
+const lbl  = "block text-xs font-medium text-gray-500 mb-1";
+const btnD = "bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded-lg text-xs font-medium transition";
+
+function Card({title, value, sub, icon, grad}) {
+  const grads = {indigo:"from-indigo-500 to-indigo-700",green:"from-emerald-500 to-emerald-700",red:"from-red-500 to-red-700",amber:"from-amber-500 to-amber-600",purple:"from-purple-500 to-purple-700",cyan:"from-cyan-500 to-cyan-700"};
+  return (
+    <div className={`bg-gradient-to-br ${grads[grad]||grads.indigo} rounded-xl p-4 text-white shadow-md`}>
+      <div className="flex justify-between items-start mb-2">
+        <span className="text-xs font-medium opacity-80">{title}</span>
+        <span className="text-xl opacity-70">{icon}</span>
+      </div>
+      <div className="text-xl font-bold leading-tight">{value}</div>
+      {sub && <div className="text-xs mt-1 opacity-75">{sub}</div>}
+    </div>
+  );
+}
+
+function Table({cols, rows, empty="No data yet"}) {
+  if(!rows||!rows.length) return <div className="text-center text-gray-400 py-10 text-sm">{empty}</div>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead><tr className="border-b border-gray-100">
+          {cols.map(c=><th key={c.k} className="text-left py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase tracking-wide">{c.l}</th>)}
+        </tr></thead>
+        <tbody>{rows.map((r,i)=>(
+          <tr key={r.id||i} className="border-b border-gray-50 hover:bg-gray-50 transition">
+            {cols.map(c=><td key={c.k} className="py-2.5 px-3 text-gray-700">{c.r?c.r(r):r[c.k]}</td>)}
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function Tag({children, color="gray"}) {
+  const colors={gray:"bg-gray-100 text-gray-600",blue:"bg-blue-100 text-blue-700",purple:"bg-purple-100 text-purple-700",green:"bg-green-100 text-green-700",red:"bg-red-100 text-red-600",amber:"bg-amber-100 text-amber-700",indigo:"bg-indigo-100 text-indigo-700"};
+  return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${colors[color]||colors.gray}`}>{children}</span>;
+}
+
+/* ─── NAV ─── */
+const NAV=[
+  {id:"dashboard",l:"Dashboard",i:"📊"},{id:"accounts",l:"Bank Accounts",i:"🏦"},
+  {id:"cards",l:"Credit Cards",i:"💳"},{id:"transactions",l:"Transactions",i:"📋"},
+  {id:"investments",l:"Investments",i:"📈"},{id:"insurance",l:"Insurance",i:"🛡️"},
+  {id:"subscriptions",l:"Subscriptions",i:"🔄"},{id:"bills",l:"Bills",i:"🧾"},
+  {id:"income",l:"Income",i:"💵"},
+  {id:"upload",l:"Upload Statement",i:"📤"},
+  {id:"reports",l:"Reports",i:"📑"},{id:"settings",l:"Settings",i:"⚙️"},
+];
+
+function Sidebar({page, setPage, collapsed, setCollapsed}) {
+  return (
+    <div className={`bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-200 ${collapsed?"w-14":"w-56"}`} style={{minHeight:"100vh"}}>
+      <div className="flex items-center gap-2 px-3 py-4 border-b border-slate-800">
+        {!collapsed && <span className="font-bold text-sm tracking-tight text-white">💰 FinTracker</span>}
+        <button onClick={()=>setCollapsed(!collapsed)} className="ml-auto text-slate-400 hover:text-white text-base w-7 h-7 flex items-center justify-center rounded hover:bg-slate-800">
+          {collapsed?"›":"‹"}
+        </button>
+      </div>
+      <nav className="flex-1 py-2">
+        {NAV.map(n=>(
+          <button key={n.id} onClick={()=>setPage(n.id)}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 text-sm transition ${page===n.id?"bg-indigo-600/25 text-indigo-300 border-r-2 border-indigo-400":"text-slate-400 hover:text-white hover:bg-slate-800"}`}>
+            <span className="text-base flex-shrink-0">{n.i}</span>
+            {!collapsed && <span className="truncate">{n.l}</span>}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   DASHBOARD
+═══════════════════════════════════ */
+function Dashboard({accounts,cards,investments,subscriptions,bills,income}) {
+  const bankBal   = accounts.reduce((s,a)=>s+(a.balance||0),0);
+  const cardOut   = cards.reduce((s,c)=>s+(c.outstanding||0),0);
+  const sharesV   = investments.shares.reduce((s,x)=>s+(x.currentPrice||x.purchasePrice)*x.quantity,0);
+  const mfV       = investments.mutualFunds.reduce((s,x)=>s+(x.currentNav||x.purchaseNav)*x.units,0);
+  const insV      = investments.insurance.reduce((s,x)=>s+(x.sumAssured||0),0);
+  const totalInv  = sharesV+mfV;
+  const netWorth  = bankBal+totalInv+insV-cardOut;
+  const monthlySubs = subscriptions.reduce((s,x)=>s+(x.cycle==="yearly"?(x.amount||0)/12:(x.amount||0)),0);
+  const unpaidBills = (bills||[]).filter(b=>b.status!=="paid");
+  const monthlyBills = (bills||[]).reduce((s,b)=>s+(b.freq==="yearly"?(b.amount||0)/12:b.freq==="quarterly"?(b.amount||0)/3:(b.amount||0)),0);
+
+  // Income calculations
+  const thisM = tod().slice(0,7);
+  const incomeList = income||[];
+  const monthlyIncomeSrcs = incomeList.reduce((s,x)=>{
+    const mo = x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+    return s+mo;
+  },0);
+  const pendingIncome = incomeList.filter(x=>x.status==="expected");
+  const in30 = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+  const upcomingIncome = incomeList.filter(x=>x.status==="expected"&&x.expectedDate&&x.expectedDate>=tod()&&x.expectedDate<=in30);
+
+  const allT = [
+    ...accounts.flatMap(a=>(a.transactions||[]).map(t=>({...t}))),
+    ...cards.flatMap(c=>(c.transactions||[]).map(t=>({...t})))
+  ];
+  const mT = allT.filter(t=>mk(t.date)===thisM);
+  const mExp = mT.reduce((s,t)=>s+(t.debit||0),0);
+  const mInc = mT.reduce((s,t)=>s+(t.credit||0),0);
+
+  // Pie data
+  const catMap = {};
+  mT.forEach(t=>{if(t.debit>0){const c=t.category||"Misc";catMap[c]=(catMap[c]||0)+t.debit;}});
+  const expPie = Object.entries(catMap).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value).slice(0,8);
+
+  // Bar data – last 6 months
+  const trend = [];
+  for(let i=5;i>=0;i--){
+    const d=new Date(); d.setMonth(d.getMonth()-i);
+    const m=d.toISOString().slice(0,7);
+    const lb=d.toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+    trend.push({
+      name:lb,
+      income:allT.filter(t=>mk(t.date)===m).reduce((s,t)=>s+(t.credit||0),0),
+      expenses:allT.filter(t=>mk(t.date)===m).reduce((s,t)=>s+(t.debit||0),0),
+    });
+  }
+
+  // Inv alloc pie
+  const invPie=[];
+  if(sharesV>0) invPie.push({name:"Shares",value:sharesV});
+  if(mfV>0)    invPie.push({name:"Mutual Funds",value:mfV});
+  if(insV>0)   invPie.push({name:"Insurance",value:insV});
+
+  const upcoming=[
+    ...cards.filter(c=>c.paymentDueDate).map(c=>({type:"Card Due",name:c.cardName,date:c.paymentDueDate,amount:c.outstanding,color:"red"})),
+    ...investments.insurance.filter(p=>p.premiumDueDate).map(p=>({type:"Insurance Premium",name:p.policyName,date:p.premiumDueDate,amount:p.annualPremium,color:"amber"})),
+    ...subscriptions.filter(s=>s.renewalDate&&s.renewalDate>=tod()&&s.renewalDate<=in30).map(s=>({type:"Subscription",name:s.name,date:s.renewalDate,amount:s.amount,color:"indigo"})),
+    ...(bills||[]).filter(b=>b.status!=="paid"&&b.dueDate&&b.dueDate>=tod()&&b.dueDate<=in30).map(b=>({type:"Bill Due",name:b.name,date:b.dueDate,amount:b.amount,color:"green"})),
+    ...upcomingIncome.map(x=>({type:"Expected Income",name:x.name,date:x.expectedDate,amount:x.amount,color:"emerald"})),
+  ].sort((a,b)=>a.date.localeCompare(b.date));
+
+  return (
+    <div>
+      <h1 className="text-xl font-bold text-gray-800 mb-5">Dashboard</h1>
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-6">
+        <Card title="Net Worth" value={fmt(netWorth)} icon="💰" grad="indigo"/>
+        <Card title="Bank Balance" value={fmt(bankBal)} icon="🏦" grad="green"/>
+        <Card title="Investments" value={fmt(totalInv)} icon="📈" grad="purple"/>
+        <Card title="Card Outstanding" value={fmt(cardOut)} icon="💳" grad="red"/>
+        <Card title="Monthly Expenses" value={fmt(mExp)} icon="📉" grad="amber"/>
+        <Card title="Monthly Income (Txn)" value={fmt(mInc)} icon="💵" grad="cyan"/>
+        <Card title="Monthly Bills" value={fmt(monthlyBills)} sub={`${unpaidBills.length} unpaid`} icon="🧾" grad="red"/>
+        <Card title="Subscriptions" value={fmt(monthlySubs)} sub="/month" icon="🔄" grad="indigo"/>
+        <Card title="Expected Monthly Income" value={fmt(monthlyIncomeSrcs)} sub={`${pendingIncome.length} pending`} icon="💰" grad="green"/>
+        <Card title="Upcoming Income (30d)" value={fmt(upcomingIncome.reduce((s,x)=>s+(x.amount||0),0))} sub={`${upcomingIncome.length} sources`} icon="📥" grad="teal"/>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Expenses by Category — {new Date().toLocaleDateString("en-IN",{month:"long"})}</h3>
+          <PieChart data={expPie}/>
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Income vs Expenses (6 months)</h3>
+          <BarChart data={trend} keys={["income","expenses"]} colors={["#10b981","#ef4444"]}/>
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Investment Allocation</h3>
+          <PieChart data={invPie} donut/>
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-2">Subscriptions</h3>
+          <div className="text-2xl font-bold text-indigo-600 mb-3">{fmt(monthlySubs)}<span className="text-sm text-gray-400 font-normal ml-1">/month</span></div>
+          <div className="space-y-1.5">
+            {subscriptions.slice(0,6).map(s=>(
+              <div key={s.id} className="flex justify-between text-sm">
+                <span className="text-gray-600">{s.name}</span>
+                <span className="font-medium text-gray-800">{fmt(s.amount)}<span className="text-gray-400 text-xs">/{s.cycle==="yearly"?"yr":"mo"}</span></span>
+              </div>
+            ))}
+            {!subscriptions.length && <div className="text-gray-400 text-sm text-center py-4">No subscriptions yet</div>}
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-2">Income Sources</h3>
+          <div className="text-2xl font-bold text-green-600 mb-3">{fmt(monthlyIncomeSrcs)}<span className="text-sm text-gray-400 font-normal ml-1">/month</span></div>
+          <div className="space-y-1.5">
+            {incomeList.slice(0,6).map(x=>(
+              <div key={x.id} className="flex justify-between text-sm items-center">
+                <span className="text-gray-600">{x.name}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${x.status==="received"?"bg-green-100 text-green-700":"bg-amber-100 text-amber-700"}`}>{x.status==="received"?"✓ Received":"Pending"}</span>
+              </div>
+            ))}
+            {!incomeList.length && <div className="text-gray-400 text-sm text-center py-4">No income sources yet</div>}
+          </div>
+        </div>
+      </div>
+
+      {upcoming.length>0 && (
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Upcoming Reminders</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            {upcoming.map((u,i)=>(
+              <div key={i} className={`rounded-lg p-3 border ${u.color==="red"?"bg-red-50 border-red-100":u.color==="amber"?"bg-amber-50 border-amber-100":u.color==="emerald"||u.color==="green"?"bg-green-50 border-green-100":"bg-indigo-50 border-indigo-100"}`}>
+                <div className={`text-xs font-semibold mb-1 ${u.color==="red"?"text-red-500":u.color==="amber"?"text-amber-600":u.color==="emerald"||u.color==="green"?"text-green-600":"text-indigo-500"}`}>{u.type}</div>
+                <div className="font-medium text-gray-800 text-sm">{u.name}</div>
+                <div className="text-xs text-gray-500 mt-0.5">{fd(u.date)} · {fmt(u.amount)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   BANK ACCOUNTS
+═══════════════════════════════════ */
+function BankAccounts({accounts,setAccounts,categories}) {
+  const [sel, setSel] = useState(null);
+  const [showA, setShowA] = useState(false);
+  const [showT, setShowT] = useState(false);
+  const [form, setForm] = useState({});
+  const [tf, setTf] = useState({});
+
+  const saveAcc = () => {
+    if(!form.bankName) return;
+    if(form.id) {
+      setAccounts(p=>p.map(a=>a.id===form.id?{...a,...form}:a));
+    } else {
+      setAccounts(p=>[...p,{...form,id:uid(),balance:parseFloat(form.openingBalance)||0,transactions:[]}]);
+    }
+    setShowA(false); setForm({});
+  };
+  const delAcc = id=>{setAccounts(p=>p.filter(a=>a.id!==id));setSel(null);};
+  const addTxn = ()=>{
+    if(!sel||!tf.date) return;
+    const t={...tf,id:uid(),debit:parseFloat(tf.debit)||0,credit:parseFloat(tf.credit)||0,category:tf.category||autoCat(tf.description)};
+    setAccounts(p=>p.map(a=>{
+      if(a.id!==sel.id) return a;
+      const txns=[...(a.transactions||[]),t];
+      const bal=(parseFloat(a.openingBalance)||0)+txns.reduce((s,x)=>s+(x.credit||0)-(x.debit||0),0);
+      return {...a,transactions:txns,balance:bal};
+    }));
+    setShowT(false); setTf({});
+  };
+  const delTxn = tid=>setAccounts(p=>p.map(a=>{
+    if(a.id!==sel.id) return a;
+    const txns=(a.transactions||[]).filter(t=>t.id!==tid);
+    const bal=(parseFloat(a.openingBalance)||0)+txns.reduce((s,t)=>s+(t.credit||0)-(t.debit||0),0);
+    return {...a,transactions:txns,balance:bal};
+  }));
+
+  useEffect(()=>{if(sel){const u=accounts.find(a=>a.id===sel.id);if(u)setSel(u);}}, [accounts]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">{sel?sel.nickname||sel.bankName:"Bank Accounts"}</h1>
+        <div className="flex gap-2">
+          {sel && <button className={btnS} onClick={()=>setSel(null)}>← Back</button>}
+          {!sel && <button className={btnP} onClick={()=>{setForm({});setShowA(true);}}>+ Add Account</button>}
+          {sel && <button className={btnP} onClick={()=>{setTf({date:tod()});setShowT(true);}}>+ Add Transaction</button>}
+        </div>
+      </div>
+
+      {!sel ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {accounts.map(a=>(
+            <div key={a.id} onClick={()=>setSel(a)} className="bg-white rounded-xl border shadow-sm p-5 cursor-pointer hover:shadow-md hover:border-indigo-200 transition">
+              <div className="flex justify-between items-start mb-3">
+                <span className="text-2xl">🏦</span>
+                <Tag color={a.type==="Current"?"amber":"green"}>{a.type||"Savings"}</Tag>
+              </div>
+              <div className="font-semibold text-gray-800">{a.bankName}</div>
+              <div className="text-xs text-gray-500 mb-3">{a.nickname}</div>
+              <div className="text-xl font-bold text-gray-900">{fmt(a.balance)}</div>
+              <div className="text-xs text-gray-400 mt-1">{(a.transactions||[]).length} transactions</div>
+            </div>
+          ))}
+          {!accounts.length && <div className="col-span-3 text-center text-gray-400 py-16 text-sm">No accounts yet — click "+ Add Account" to get started.</div>}
+        </div>
+      ) : (
+        <div>
+          <div className="grid grid-cols-3 gap-3 mb-5">
+            <Card title="Current Balance" value={fmt(sel.balance)} icon="🏦" grad="green"/>
+            <Card title="Total Credits" value={fmt((sel.transactions||[]).reduce((s,t)=>s+(t.credit||0),0))} icon="📥" grad="indigo"/>
+            <Card title="Total Debits" value={fmt((sel.transactions||[]).reduce((s,t)=>s+(t.debit||0),0))} icon="📤" grad="red"/>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-semibold text-gray-700 text-sm">Transactions</h3>
+              <button className={btnD} onClick={()=>delAcc(sel.id)}>Delete Account</button>
+            </div>
+            <Table cols={[
+              {k:"date",l:"Date",r:r=>fd(r.date)},
+              {k:"description",l:"Description"},
+              {k:"category",l:"Category",r:r=><Tag>{r.category}</Tag>},
+              {k:"debit",l:"Debit",r:r=>r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""},
+              {k:"credit",l:"Credit",r:r=>r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""},
+              {k:"balance",l:"Balance",r:r=>r.balance?<span className="text-gray-500 text-xs font-mono">{fmt(r.balance)}</span>:""},
+              {k:"del",l:"",r:r=><button className="text-red-300 hover:text-red-500 text-xs" onClick={e=>{e.stopPropagation();delTxn(r.id)}}>✕</button>},
+            ]} rows={[...(sel.transactions||[])].sort((a,b)=>b.date.localeCompare(a.date))} empty="No transactions yet"/>
+          </div>
+        </div>
+      )}
+
+      <Modal open={showA} onClose={()=>setShowA(false)} title="Add Bank Account">
+        <F label="Bank Name"><input className={inp} value={form.bankName||""} onChange={e=>setForm({...form,bankName:e.target.value})} placeholder="e.g. HDFC Bank"/></F>
+        <F label="Account Nickname"><input className={inp} value={form.nickname||""} onChange={e=>setForm({...form,nickname:e.target.value})} placeholder="e.g. Salary Account"/></F>
+        <F label="Account Type"><select className={inp} value={form.type||"Savings"} onChange={e=>setForm({...form,type:e.target.value})}><option>Savings</option><option>Current</option></select></F>
+        <F label="Opening Balance"><input type="number" className={inp} value={form.openingBalance||""} onChange={e=>setForm({...form,openingBalance:e.target.value})} placeholder="0"/></F>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={saveAcc}>Save Account</button><button className={btnS} onClick={()=>setShowA(false)}>Cancel</button></div>
+      </Modal>
+
+      <Modal open={showT} onClose={()=>setShowT(false)} title="Add Transaction">
+        <F label="Date"><input type="date" className={inp} value={tf.date||""} onChange={e=>setTf({...tf,date:e.target.value})}/></F>
+        <F label="Description"><input className={inp} value={tf.description||""} onChange={e=>setTf({...tf,description:e.target.value})} placeholder="e.g. Grocery shopping"/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Debit (Expense)"><input type="number" className={inp} value={tf.debit||""} onChange={e=>setTf({...tf,debit:e.target.value})} placeholder="0"/></F>
+          <F label="Credit (Income)"><input type="number" className={inp} value={tf.credit||""} onChange={e=>setTf({...tf,credit:e.target.value})} placeholder="0"/></F>
+        </div>
+        <F label="Category"><select className={inp} value={tf.category||""} onChange={e=>setTf({...tf,category:e.target.value})}><option value="">Auto-detect</option>{categories.map(c=><option key={c}>{c}</option>)}</select></F>
+        <F label="Notes"><input className={inp} value={tf.notes||""} onChange={e=>setTf({...tf,notes:e.target.value})} placeholder="Optional"/></F>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={addTxn}>Add Transaction</button><button className={btnS} onClick={()=>setShowT(false)}>Cancel</button></div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   CREDIT CARDS
+═══════════════════════════════════ */
+function CreditCards({cards,setCards,categories}) {
+  const [sel,setSel]=useState(null);
+  const [showA,setShowA]=useState(false);
+  const [showT,setShowT]=useState(false);
+  const [form,setForm]=useState({});
+  const [tf,setTf]=useState({});
+
+  const saveCard=()=>{
+    if(!form.bankName) return;
+    if(form.id){setCards(p=>p.map(c=>c.id===form.id?{...c,...form}:c));}
+    else{setCards(p=>[...p,{...form,id:uid(),outstanding:0,transactions:[]}]);}
+    setShowA(false);setForm({});
+  };
+  const delCard=id=>{setCards(p=>p.filter(c=>c.id!==id));setSel(null);};
+  const addTxn=()=>{
+    if(!sel||!tf.date) return;
+    const t={...tf,id:uid(),debit:parseFloat(tf.debit)||0,credit:parseFloat(tf.credit)||0,category:tf.category||autoCat(tf.description)};
+    setCards(p=>p.map(c=>{
+      if(c.id!==sel.id) return c;
+      const txns=[...(c.transactions||[]),t];
+      const out=txns.reduce((s,t)=>s+(t.debit||0)-(t.credit||0),0);
+      return {...c,transactions:txns,outstanding:Math.max(0,out)};
+    }));
+    setShowT(false);setTf({});
+  };
+  useEffect(()=>{if(sel){const u=cards.find(c=>c.id===sel.id);if(u)setSel(u);}}, [cards]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">{sel?sel.cardName||sel.bankName:"Credit Cards"}</h1>
+        <div className="flex gap-2">
+          {sel && <button className={btnS} onClick={()=>setSel(null)}>← Back</button>}
+          {!sel && <button className={btnP} onClick={()=>{setForm({});setShowA(true);}}>+ Add Card</button>}
+          {sel && <button className={btnP} onClick={()=>{setTf({date:tod()});setShowT(true);}}>+ Add Transaction</button>}
+        </div>
+      </div>
+
+      {!sel ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {cards.map(c=>{
+            const util=c.creditLimit?Math.min(((c.outstanding/c.creditLimit)*100),100).toFixed(0):0;
+            return (
+              <div key={c.id} onClick={()=>setSel(c)} className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-5 text-white cursor-pointer hover:shadow-xl transition shadow-lg">
+                <div className="flex justify-between mb-4">
+                  <div><div className="text-xs opacity-60 mb-0.5">{c.bankName}</div><div className="font-bold">{c.cardName}</div></div>
+                  <span className="text-2xl">💳</span>
+                </div>
+                <div className="mb-3"><div className="text-xs opacity-50 mb-0.5">Outstanding</div><div className="text-xl font-bold text-red-400">{fmt(c.outstanding)}</div></div>
+                <div className="flex justify-between text-xs opacity-60 mb-1.5">
+                  <span>Limit: {fmt(c.creditLimit)}</span><span>{util}% used</span>
+                </div>
+                <div className="bg-slate-700 rounded-full h-1.5">
+                  <div className={`h-1.5 rounded-full transition-all ${util>80?"bg-red-400":util>50?"bg-amber-400":"bg-green-400"}`} style={{width:`${util}%`}}/>
+                </div>
+                {c.paymentDueDate && <div className="text-xs opacity-50 mt-2">Due: {fd(c.paymentDueDate)}</div>}
+              </div>
+            );
+          })}
+          {!cards.length && <div className="col-span-3 text-center text-gray-400 py-16 text-sm">No credit cards added yet.</div>}
+        </div>
+      ) : (
+        <div>
+          <div className="grid grid-cols-4 gap-3 mb-5">
+            <Card title="Outstanding" value={fmt(sel.outstanding)} icon="💳" grad="red"/>
+            <Card title="Credit Limit" value={fmt(sel.creditLimit)} icon="📊" grad="indigo"/>
+            <Card title="Available" value={fmt((sel.creditLimit||0)-(sel.outstanding||0))} icon="✅" grad="green"/>
+            <Card title="Due Date" value={sel.paymentDueDate?fd(sel.paymentDueDate):"N/A"} icon="📅" grad="amber"/>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <div className="flex justify-between mb-4">
+              <h3 className="font-semibold text-gray-700 text-sm">Transactions</h3>
+              <button className={btnD} onClick={()=>delCard(sel.id)}>Delete Card</button>
+            </div>
+            <Table cols={[
+              {k:"date",l:"Date",r:r=>fd(r.date)},{k:"description",l:"Description"},
+              {k:"category",l:"Category",r:r=><Tag>{r.category}</Tag>},
+              {k:"debit",l:"Spent",r:r=>r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""},
+              {k:"credit",l:"Payment",r:r=>r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""},
+            ]} rows={[...(sel.transactions||[])].sort((a,b)=>b.date.localeCompare(a.date))}/>
+          </div>
+        </div>
+      )}
+
+      <Modal open={showA} onClose={()=>setShowA(false)} title="Add Credit Card">
+        <F label="Bank Name"><input className={inp} value={form.bankName||""} onChange={e=>setForm({...form,bankName:e.target.value})} placeholder="e.g. ICICI Bank"/></F>
+        <F label="Card Name"><input className={inp} value={form.cardName||""} onChange={e=>setForm({...form,cardName:e.target.value})} placeholder="e.g. Amazon Pay Card"/></F>
+        <F label="Credit Limit"><input type="number" className={inp} value={form.creditLimit||""} onChange={e=>setForm({...form,creditLimit:parseFloat(e.target.value)||0})}/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Billing Cycle Start"><input type="date" className={inp} value={form.billingCycleStart||""} onChange={e=>setForm({...form,billingCycleStart:e.target.value})}/></F>
+          <F label="Payment Due Date"><input type="date" className={inp} value={form.paymentDueDate||""} onChange={e=>setForm({...form,paymentDueDate:e.target.value})}/></F>
+        </div>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={saveCard}>Save</button><button className={btnS} onClick={()=>setShowA(false)}>Cancel</button></div>
+      </Modal>
+      <Modal open={showT} onClose={()=>setShowT(false)} title="Add Card Transaction">
+        <F label="Date"><input type="date" className={inp} value={tf.date||""} onChange={e=>setTf({...tf,date:e.target.value})}/></F>
+        <F label="Description"><input className={inp} value={tf.description||""} onChange={e=>setTf({...tf,description:e.target.value})}/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Spent (Debit)"><input type="number" className={inp} value={tf.debit||""} onChange={e=>setTf({...tf,debit:e.target.value})}/></F>
+          <F label="Payment (Credit)"><input type="number" className={inp} value={tf.credit||""} onChange={e=>setTf({...tf,credit:e.target.value})}/></F>
+        </div>
+        <F label="Category"><select className={inp} value={tf.category||""} onChange={e=>setTf({...tf,category:e.target.value})}><option value="">Auto-detect</option>{categories.map(c=><option key={c}>{c}</option>)}</select></F>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={addTxn}>Add</button><button className={btnS} onClick={()=>setShowT(false)}>Cancel</button></div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   ALL TRANSACTIONS
+═══════════════════════════════════ */
+function Transactions({accounts,cards,categories}) {
+  const [q,setQ]=useState(""); const [cat,setCat]=useState(""); const [src,setSrc]=useState(""); const [df,setDf]=useState(""); const [dt,setDt]=useState("");
+  const all = useMemo(()=>[
+    ...accounts.flatMap(a=>(a.transactions||[]).map(t=>({...t,source:a.nickname||a.bankName,sType:"Bank"}))),
+    ...cards.flatMap(c=>(c.transactions||[]).map(t=>({...t,source:c.cardName||c.bankName,sType:"Card"})))
+  ].sort((a,b)=>b.date.localeCompare(a.date)),[accounts,cards]);
+  const filtered=all.filter(t=>{
+    if(q && !t.description?.toLowerCase().includes(q.toLowerCase())&&!t.source?.toLowerCase().includes(q.toLowerCase())) return false;
+    if(cat&&t.category!==cat) return false;
+    if(src&&t.source!==src) return false;
+    if(df&&t.date<df) return false;
+    if(dt&&t.date>dt) return false;
+    return true;
+  });
+  const sources=[...new Set(all.map(t=>t.source))];
+  return (
+    <div>
+      <h1 className="text-xl font-bold text-gray-800 mb-5">All Transactions</h1>
+      <div className="bg-white rounded-xl border shadow-sm p-4 mb-5 grid grid-cols-2 md:grid-cols-5 gap-2">
+        <input className={inp} placeholder="🔍 Search…" value={q} onChange={e=>setQ(e.target.value)}/>
+        <select className={inp} value={cat} onChange={e=>setCat(e.target.value)}><option value="">All Categories</option>{categories.map(c=><option key={c}>{c}</option>)}</select>
+        <select className={inp} value={src} onChange={e=>setSrc(e.target.value)}><option value="">All Accounts</option>{sources.map(s=><option key={s}>{s}</option>)}</select>
+        <input type="date" className={inp} value={df} onChange={e=>setDf(e.target.value)}/>
+        <input type="date" className={inp} value={dt} onChange={e=>setDt(e.target.value)}/>
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5">
+        <div className="text-xs text-gray-400 mb-3">{filtered.length} transactions</div>
+        <Table cols={[
+          {k:"date",l:"Date",r:r=>fd(r.date)},
+          {k:"source",l:"Account",r:r=><Tag color={r.sType==="Card"?"purple":"blue"}>{r.source}</Tag>},
+          {k:"description",l:"Description"},{k:"category",l:"Category",r:r=><Tag>{r.category}</Tag>},
+          {k:"debit",l:"Debit",r:r=>r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""},
+          {k:"credit",l:"Credit",r:r=>r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""},
+        ]} rows={filtered} empty="No transactions match filters"/>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   INVESTMENTS
+═══════════════════════════════════ */
+function Investments({investments,setInvestments}) {
+  const [tab,setTab]=useState("shares");
+  const [show,setShow]=useState(false);
+  const [form,setForm]=useState({});
+  const sv=investments.shares.reduce((s,x)=>s+(x.currentPrice||x.purchasePrice)*x.quantity,0);
+  const sc=investments.shares.reduce((s,x)=>s+x.purchasePrice*x.quantity,0);
+  const mv=investments.mutualFunds.reduce((s,x)=>s+(x.currentNav||x.purchaseNav)*x.units,0);
+  const mc=investments.mutualFunds.reduce((s,x)=>s+x.purchaseNav*x.units,0);
+  const saveShare=()=>{
+    if(!form.stockName) return;
+    const item={...form,id:form.id||uid(),quantity:parseFloat(form.quantity)||0,purchasePrice:parseFloat(form.purchasePrice)||0,currentPrice:parseFloat(form.currentPrice)||parseFloat(form.purchasePrice)||0};
+    setInvestments(p=>({...p,shares:form.id?p.shares.map(s=>s.id===form.id?item:s):[...p.shares,item]}));
+    setShow(false);setForm({});
+  };
+  const saveMF=()=>{
+    if(!form.fundName) return;
+    const item={...form,id:form.id||uid(),units:parseFloat(form.units)||0,purchaseNav:parseFloat(form.purchaseNav)||0,currentNav:parseFloat(form.currentNav)||parseFloat(form.purchaseNav)||0};
+    setInvestments(p=>({...p,mutualFunds:form.id?p.mutualFunds.map(m=>m.id===form.id?item:m):[...p.mutualFunds,item]}));
+    setShow(false);setForm({});
+  };
+  const del=(type,id)=>setInvestments(p=>({...p,[type]:p[type].filter(x=>x.id!==id)}));
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">Investments</h1>
+        <button className={btnP} onClick={()=>{setForm({});setShow(true);}}>+ Add {tab==="shares"?"Share":"Mutual Fund"}</button>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <Card title="Shares Value" value={fmt(sv)} sub={`P&L: ${fmt(sv-sc)}`} icon="📊" grad={sv>=sc?"green":"red"}/>
+        <Card title="MF Value" value={fmt(mv)} sub={`P&L: ${fmt(mv-mc)}`} icon="📈" grad={mv>=mc?"green":"red"}/>
+        <Card title="Total Portfolio" value={fmt(sv+mv)} icon="💎" grad="purple"/>
+        <Card title="Total P&L" value={fmt((sv+mv)-(sc+mc))} icon="💰" grad={(sv+mv)>=(sc+mc)?"green":"red"}/>
+      </div>
+      <div className="flex gap-2 mb-4">
+        {[{id:"shares",l:"Shares"},{id:"mf",l:"Mutual Funds"}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} className={`px-4 py-2 rounded-lg text-sm font-medium transition ${tab===t.id?"bg-indigo-600 text-white":"bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+            {t.l} ({t.id==="shares"?investments.shares.length:investments.mutualFunds.length})
+          </button>
+        ))}
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5">
+        {tab==="shares" && <Table cols={[
+          {k:"stockName",l:"Stock"},{k:"ticker",l:"Ticker",r:r=><span className="font-mono text-xs bg-gray-100 px-2 py-0.5 rounded">{r.ticker}</span>},
+          {k:"qty",l:"Qty",r:r=>r.quantity},
+          {k:"bp",l:"Buy Price",r:r=>fmt(r.purchasePrice)},
+          {k:"cp",l:"Current",r:r=>fmt(r.currentPrice||r.purchasePrice)},
+          {k:"val",l:"Value",r:r=>fmt((r.currentPrice||r.purchasePrice)*r.quantity)},
+          {k:"pl",l:"P&L",r:r=>{const pl=((r.currentPrice||r.purchasePrice)-r.purchasePrice)*r.quantity;return <span className={pl>=0?"text-green-600":"text-red-600"}>{fmt(pl)}</span>}},
+          {k:"d",l:"",r:r=><button className="text-red-300 hover:text-red-500 text-xs" onClick={()=>del("shares",r.id)}>✕</button>},
+        ]} rows={investments.shares} empty="No shares tracked yet"/>}
+        {tab==="mf" && <Table cols={[
+          {k:"fundName",l:"Fund"},{k:"units",l:"Units"},
+          {k:"pn",l:"Buy NAV",r:r=>fmt(r.purchaseNav)},
+          {k:"cn",l:"Current NAV",r:r=>fmt(r.currentNav||r.purchaseNav)},
+          {k:"val",l:"Value",r:r=>fmt((r.currentNav||r.purchaseNav)*r.units)},
+          {k:"pl",l:"Gain/Loss",r:r=>{const pl=((r.currentNav||r.purchaseNav)-r.purchaseNav)*r.units;return <span className={pl>=0?"text-green-600":"text-red-600"}>{fmt(pl)}</span>}},
+          {k:"d",l:"",r:r=><button className="text-red-300 hover:text-red-500 text-xs" onClick={()=>del("mutualFunds",r.id)}>✕</button>},
+        ]} rows={investments.mutualFunds} empty="No mutual funds tracked yet"/>}
+      </div>
+      <Modal open={show&&tab==="shares"} onClose={()=>setShow(false)} title="Add Share">
+        <F label="Stock Name"><input className={inp} value={form.stockName||""} onChange={e=>setForm({...form,stockName:e.target.value})} placeholder="e.g. Reliance Industries"/></F>
+        <F label="Ticker Symbol"><input className={inp} value={form.ticker||""} onChange={e=>setForm({...form,ticker:e.target.value})} placeholder="e.g. RELIANCE"/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Quantity"><input type="number" className={inp} value={form.quantity||""} onChange={e=>setForm({...form,quantity:e.target.value})}/></F>
+          <F label="Purchase Price"><input type="number" className={inp} value={form.purchasePrice||""} onChange={e=>setForm({...form,purchasePrice:e.target.value})}/></F>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Current Price"><input type="number" className={inp} value={form.currentPrice||""} onChange={e=>setForm({...form,currentPrice:e.target.value})}/></F>
+          <F label="Purchase Date"><input type="date" className={inp} value={form.purchaseDate||""} onChange={e=>setForm({...form,purchaseDate:e.target.value})}/></F>
+        </div>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={saveShare}>Save</button><button className={btnS} onClick={()=>setShow(false)}>Cancel</button></div>
+      </Modal>
+      <Modal open={show&&tab==="mf"} onClose={()=>setShow(false)} title="Add Mutual Fund">
+        <F label="Fund Name"><input className={inp} value={form.fundName||""} onChange={e=>setForm({...form,fundName:e.target.value})} placeholder="e.g. HDFC Flexi Cap Fund"/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Units"><input type="number" className={inp} value={form.units||""} onChange={e=>setForm({...form,units:e.target.value})}/></F>
+          <F label="Purchase NAV"><input type="number" className={inp} value={form.purchaseNav||""} onChange={e=>setForm({...form,purchaseNav:e.target.value})}/></F>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Current NAV"><input type="number" className={inp} value={form.currentNav||""} onChange={e=>setForm({...form,currentNav:e.target.value})}/></F>
+          <F label="Date"><input type="date" className={inp} value={form.investmentDate||""} onChange={e=>setForm({...form,investmentDate:e.target.value})}/></F>
+        </div>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={saveMF}>Save</button><button className={btnS} onClick={()=>setShow(false)}>Cancel</button></div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   INSURANCE
+═══════════════════════════════════ */
+function Insurance({investments,setInvestments}) {
+  const [show,setShow]=useState(false); const [form,setForm]=useState({});
+  const save=()=>{
+    if(!form.policyName) return;
+    const item={...form,id:form.id||uid(),annualPremium:parseFloat(form.annualPremium)||0,sumAssured:parseFloat(form.sumAssured)||0};
+    setInvestments(p=>({...p,insurance:form.id?p.insurance.map(x=>x.id===form.id?item:x):[...p.insurance,item]}));
+    setShow(false);setForm({});
+  };
+  const del=id=>setInvestments(p=>({...p,insurance:p.insurance.filter(x=>x.id!==id)}));
+  const tp=investments.insurance.reduce((s,p)=>s+(p.annualPremium||0),0);
+  const ts=investments.insurance.reduce((s,p)=>s+(p.sumAssured||0),0);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">Insurance Policies</h1>
+        <button className={btnP} onClick={()=>{setForm({});setShow(true);}}>+ Add Policy</button>
+      </div>
+      <div className="grid grid-cols-3 gap-3 mb-5">
+        <Card title="Policies" value={investments.insurance.length} icon="🛡️" grad="indigo"/>
+        <Card title="Annual Premium" value={fmt(tp)} icon="💸" grad="amber"/>
+        <Card title="Sum Assured" value={fmt(ts)} icon="🏥" grad="green"/>
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5">
+        <Table cols={[
+          {k:"policyName",l:"Policy Name"},{k:"policyNumber",l:"Policy No."},
+          {k:"ap",l:"Annual Premium",r:r=>fmt(r.annualPremium)},
+          {k:"pd",l:"Premium Due",r:r=>fd(r.premiumDueDate)},
+          {k:"sa",l:"Sum Assured",r:r=>fmt(r.sumAssured)},
+          {k:"md",l:"Maturity",r:r=>fd(r.maturityDate)},
+          {k:"act",l:"",r:r=><div className="flex gap-2">
+            <button className="text-indigo-400 hover:text-indigo-600 text-xs" onClick={()=>{setForm(r);setShow(true);}}>Edit</button>
+            <button className="text-red-300 hover:text-red-500 text-xs" onClick={()=>del(r.id)}>✕</button>
+          </div>},
+        ]} rows={investments.insurance} empty="No insurance policies tracked yet"/>
+      </div>
+      <Modal open={show} onClose={()=>setShow(false)} title={form.id?"Edit Policy":"Add Insurance Policy"}>
+        <F label="Policy Name"><input className={inp} value={form.policyName||""} onChange={e=>setForm({...form,policyName:e.target.value})} placeholder="e.g. LIC Jeevan Anand"/></F>
+        <F label="Policy Number"><input className={inp} value={form.policyNumber||""} onChange={e=>setForm({...form,policyNumber:e.target.value})}/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Annual Premium"><input type="number" className={inp} value={form.annualPremium||""} onChange={e=>setForm({...form,annualPremium:e.target.value})}/></F>
+          <F label="Sum Assured"><input type="number" className={inp} value={form.sumAssured||""} onChange={e=>setForm({...form,sumAssured:e.target.value})}/></F>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Premium Due Date"><input type="date" className={inp} value={form.premiumDueDate||""} onChange={e=>setForm({...form,premiumDueDate:e.target.value})}/></F>
+          <F label="Maturity Date"><input type="date" className={inp} value={form.maturityDate||""} onChange={e=>setForm({...form,maturityDate:e.target.value})}/></F>
+        </div>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={save}>Save</button><button className={btnS} onClick={()=>setShow(false)}>Cancel</button></div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   SUBSCRIPTIONS
+═══════════════════════════════════ */
+function Subscriptions({subscriptions,setSubscriptions,categories}) {
+  const [show,setShow]=useState(false); const [form,setForm]=useState({});
+  const save=()=>{
+    if(!form.name) return;
+    const item={...form,id:form.id||uid(),amount:parseFloat(form.amount)||0};
+    setSubscriptions(p=>form.id?p.map(s=>s.id===form.id?item:s):[...p,item]);
+    setShow(false);setForm({});
+  };
+  const del=id=>setSubscriptions(p=>p.filter(s=>s.id!==id));
+  const mTotal=subscriptions.reduce((s,x)=>s+(x.cycle==="yearly"?(x.amount||0)/12:(x.amount||0)),0);
+  const yTotal=subscriptions.reduce((s,x)=>s+(x.cycle==="yearly"?(x.amount||0):(x.amount||0)*12),0);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">Subscriptions</h1>
+        <button className={btnP} onClick={()=>{setForm({cycle:"monthly"});setShow(true);}}>+ Add Subscription</button>
+      </div>
+      <div className="grid grid-cols-3 gap-3 mb-5">
+        <Card title="Active" value={subscriptions.length} icon="🔄" grad="indigo"/>
+        <Card title="Monthly Cost" value={fmt(mTotal)} icon="📅" grad="amber"/>
+        <Card title="Annual Cost" value={fmt(yTotal)} icon="📆" grad="red"/>
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5">
+        <Table cols={[
+          {k:"name",l:"Subscription"},{k:"cat",l:"Category",r:r=><Tag>{r.category||"General"}</Tag>},
+          {k:"amount",l:"Amount",r:r=>fmt(r.amount)},
+          {k:"cycle",l:"Cycle",r:r=><Tag color={r.cycle==="yearly"?"purple":"blue"}>{r.cycle}</Tag>},
+          {k:"renewalDate",l:"Next Renewal",r:r=>fd(r.renewalDate)},
+          {k:"pm",l:"Payment Method",r:r=>r.paymentMethod||"—"},
+          {k:"act",l:"",r:r=><div className="flex gap-2">
+            <button className="text-indigo-400 hover:text-indigo-600 text-xs" onClick={()=>{setForm(r);setShow(true);}}>Edit</button>
+            <button className="text-red-300 hover:text-red-500 text-xs" onClick={()=>del(r.id)}>✕</button>
+          </div>},
+        ]} rows={subscriptions} empty="No subscriptions tracked yet"/>
+      </div>
+      <Modal open={show} onClose={()=>setShow(false)} title={form.id?"Edit Subscription":"Add Subscription"}>
+        <F label="Name"><input className={inp} value={form.name||""} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Netflix"/></F>
+        <F label="Category"><select className={inp} value={form.category||""} onChange={e=>setForm({...form,category:e.target.value})}><option value="">Select…</option>{categories.map(c=><option key={c}>{c}</option>)}</select></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Amount"><input type="number" className={inp} value={form.amount||""} onChange={e=>setForm({...form,amount:e.target.value})}/></F>
+          <F label="Billing Cycle"><select className={inp} value={form.cycle||"monthly"} onChange={e=>setForm({...form,cycle:e.target.value})}><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></F>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Renewal Date"><input type="date" className={inp} value={form.renewalDate||""} onChange={e=>setForm({...form,renewalDate:e.target.value})}/></F>
+          <F label="Payment Method"><input className={inp} value={form.paymentMethod||""} onChange={e=>setForm({...form,paymentMethod:e.target.value})} placeholder="e.g. HDFC Card"/></F>
+        </div>
+        <div className="flex gap-2 pt-1"><button className={btnP} onClick={save}>Save</button><button className={btnS} onClick={()=>setShow(false)}>Cancel</button></div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   UPLOAD STATEMENT
+═══════════════════════════════════ */
+function UploadStatement({accounts,setAccounts,categories}) {
+  const [parsed,setParsed]=useState([]);
+  const [target,setTarget]=useState("");
+  const [done,setDone]=useState(false);
+  const [err,setErr]=useState("");
+  const [fileName,setFileName]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [tab,setTab]=useState("file"); // "file" | "paste"
+  const [csv,setCsv]=useState("");
+  const [importedBalance,setImportedBalance]=useState(null); // closing balance from statement
+  const fileRef = React.useRef();
+
+  /* ── parse Indian date strings: DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY etc. ── */
+  const parseIndianDate = raw => {
+    // Strip trailing non-alphanumeric chars (HDFC appends letters like "01/03/26Z")
+    const s = String(raw||"").trim().replace(/[^0-9\/\-\.]+$/,"").trim();
+    // Excel serial number
+    const num = parseFloat(s);
+    if(!isNaN(num) && num > 40000 && num < 70000 && window.XLSX) {
+      try {
+        const d = window.XLSX.SSF.parse_date_code(num);
+        return `${d.y}-${String(d.m).padStart(2,"0")}-${String(d.d).padStart(2,"0")}`;
+      } catch(e){}
+    }
+    // DD/MM/YY or DD/MM/YYYY or DD-MM-YYYY
+    const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
+    if(m) {
+      let [,dd,mm,yy]=m;
+      if(yy.length===2) yy = parseInt(yy)<50?"20"+yy:"19"+yy;
+      return `${yy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+    }
+    // Standard ISO / other formats
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? tod() : d.toISOString().slice(0,10);
+  };
+
+  /* ── scan all rows to find the actual header row (handles bank preamble rows) ── */
+  const findHeaderRow = allRows => {
+    const keywords = ["date","narration","narr","description","withdrawal","deposit","debit","credit","particulars"];
+    for(let i=0;i<allRows.length;i++){
+      const row = allRows[i].map(c=>String(c||"").trim().toLowerCase());
+      const hits = row.filter(c => keywords.some(k=>c.includes(k)));
+      if(hits.length >= 2) return i; // found header row
+    }
+    return 0;
+  };
+
+  /* ── shared row builder ── */
+  const buildRows = (allRows) => {
+    const hdrIdx = findHeaderRow(allRows);
+    const hdr = allRows[hdrIdx].map(h=>String(h||"").trim().toLowerCase());
+    const dataRows = allRows.slice(hdrIdx+1);
+
+    const di  = hdr.findIndex(h=>h.includes("date") && !h.includes("value"));
+    const ni  = hdr.findIndex(h=>h.includes("narr")||h.includes("desc")||h.includes("part")||h.includes("remark")||h.includes("detail")||h.includes("particular")||h.includes("transaction"));
+    const dbi = hdr.findIndex(h=>h.includes("withdrawal")||h.includes("debit")||h.includes("withdr")||h.includes("dr "));
+    const cri = hdr.findIndex(h=>h.includes("deposit")||h.includes("credit")||h.includes("cr "));
+    // Closing/running balance column
+    const bli = hdr.findIndex(h=>h.includes("closing")||h.includes("balance")||h.includes("bal"));
+
+    const rows=[];
+    let lastBalance = null;
+    for(const c of dataRows){
+      if(!c||c.length<2) continue;
+      const clean = v => (v===undefined||v===null)?"":String(v).trim().replace(/"/g,"");
+      const desc  = clean(ni>=0?c[ni]:c[1]);
+      const raw   = clean(di>=0?c[di]:c[0]);
+      const dateVal = parseIndianDate(raw);
+      const deb  = dbi>=0?parseFloat(clean(c[dbi]).replace(/[^0-9.]/g,""))||0:0;
+      const cred = cri>=0?parseFloat(clean(c[cri]).replace(/[^0-9.]/g,""))||0:0;
+      // Capture closing balance from the row
+      const balRaw = bli>=0?parseFloat(clean(c[bli]).replace(/[^0-9.]/g,""))||null:null;
+      if(balRaw!==null && balRaw>0) lastBalance = balRaw;
+      // Skip empty/summary rows
+      if(!desc && !deb && !cred) continue;
+      if(desc.toLowerCase().includes("opening balance")||desc.toLowerCase().includes("closing bal")||desc.toLowerCase().includes("statement summary")) continue;
+      rows.push({id:uid(),date:dateVal,description:desc,debit:deb,credit:cred,balance:balRaw,category:autoCat(desc),notes:"Imported"});
+    }
+    return {rows, closingBalance: lastBalance};
+  };
+
+  /* ── parse Excel / CSV file ── */
+  const handleFile = e => {
+    const file = e.target.files[0];
+    if(!file) return;
+    setErr(""); setDone(false); setParsed([]); setFileName(file.name); setLoading(true);
+    const reader = new FileReader();
+    const isCSV = file.name.toLowerCase().endsWith(".csv");
+
+    reader.onload = ev => {
+      try {
+        let allRows;
+        if(isCSV) {
+          const text = ev.target.result;
+          const lines = text.trim().split(/\r?\n/);
+          allRows = lines.map(l=>l.split(",").map(x=>x.trim().replace(/"/g,"")));
+        } else {
+          // Excel using SheetJS
+          const wb = window.XLSX.read(ev.target.result, {type:"array"});
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          allRows = window.XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:""});
+          if(allRows.length<2){setErr("Sheet appears empty.");setLoading(false);return;}
+        }
+        const {rows, closingBalance} = buildRows(allRows);
+        if(!rows.length){setErr("No valid transactions found. Check that your file has Date, Narration/Description, Withdrawal/Debit, and Deposit/Credit columns.");setLoading(false);return;}
+        setParsed(rows);
+        if(closingBalance!==null) setImportedBalance(closingBalance);
+      } catch(ex) {
+        setErr("Could not read file: "+ex.message);
+      }
+      setLoading(false);
+    };
+    reader.onerror = ()=>{setErr("Failed to read file.");setLoading(false);};
+    if(isCSV) reader.readAsText(file);
+    else       reader.readAsArrayBuffer(file);
+    // reset input so same file can be re-selected
+    e.target.value="";
+  };
+
+  /* ── parse pasted CSV ── */
+  const parsePaste = () => {
+    setErr(""); setDone(false);
+    const lines = csv.trim().split(/\r?\n/);
+    if(lines.length<2){setErr("Need at least a header row and one data row.");return;}
+    const allRows = lines.map(l=>l.split(",").map(x=>x.trim().replace(/"/g,"")));
+    const {rows, closingBalance} = buildRows(allRows);
+    if(!rows.length){setErr("No valid transactions found.");return;}
+    setParsed(rows);
+    if(closingBalance!==null) setImportedBalance(closingBalance);
+  };
+
+  const importAll=()=>{
+    if(!target||!parsed.length) return;
+    setAccounts(p=>p.map(a=>{
+      if(a.id!==target) return a;
+      const txns=[...(a.transactions||[]),...parsed];
+      // Use statement's closing balance if available, otherwise compute from transactions
+      const bal = importedBalance !== null
+        ? importedBalance
+        : (parseFloat(a.openingBalance)||0)+txns.reduce((s,t)=>s+(t.credit||0)-(t.debit||0),0);
+      return {...a, transactions:txns, balance:bal};
+    }));
+    setDone(true); setParsed([]); setCsv(""); setFileName(""); setImportedBalance(null);
+  };
+  const updCat=(id,cat)=>setParsed(p=>p.map(t=>t.id===id?{...t,category:cat}:t));
+  const delRow=id=>setParsed(p=>p.filter(t=>t.id!==id));
+
+  return (
+    <div>
+      <h1 className="text-xl font-bold text-gray-800 mb-5">Upload Bank Statement</h1>
+
+      {done && <div className="bg-green-50 border border-green-200 text-green-700 rounded-lg px-4 py-3 mb-4 text-sm font-medium">✅ {parsed.length||""} Transactions imported successfully!</div>}
+      {err  && <div className="bg-red-50 border border-red-200 text-red-600 rounded-lg px-4 py-3 mb-4 text-sm">⚠️ {err}</div>}
+
+      {/* Tab switcher */}
+      <div className="flex gap-2 mb-4">
+        {[{id:"file",l:"📁 Upload File"},{id:"paste",l:"📋 Paste CSV"}].map(t=>(
+          <button key={t.id} onClick={()=>{setTab(t.id);setParsed([]);setErr("");}} className={`px-4 py-2 rounded-lg text-sm font-medium transition ${tab===t.id?"bg-indigo-600 text-white":"bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>{t.l}</button>
+        ))}
+      </div>
+
+      {tab==="file" && (
+        <div className="bg-white rounded-xl border shadow-sm p-6 mb-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-1">Upload Excel or CSV</h3>
+          <p className="text-xs text-gray-400 mb-5">Supports <strong>.xlsx</strong>, <strong>.xls</strong>, and <strong>.csv</strong> files. Columns auto-detected — works with most Indian bank statement formats.</p>
+
+          {/* Drop zone */}
+          <div
+            onClick={()=>fileRef.current.click()}
+            className="border-2 border-dashed border-indigo-200 rounded-xl p-10 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition"
+          >
+            <div className="text-4xl mb-3">📂</div>
+            {loading
+              ? <div className="text-sm text-indigo-500 font-medium">Parsing file…</div>
+              : fileName
+              ? <div className="text-sm text-gray-700 font-medium">{fileName} — click to change</div>
+              : <>
+                  <div className="text-sm font-medium text-gray-700 mb-1">Click to select file</div>
+                  <div className="text-xs text-gray-400">.xlsx · .xls · .csv</div>
+                </>
+            }
+          </div>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile}/>
+
+          {/* Column mapping guide */}
+          <div className="mt-5 bg-gray-50 rounded-lg p-4">
+            <div className="text-xs font-semibold text-gray-500 mb-1">Auto-detected columns — works with most Indian bank formats</div>
+            <div className="text-xs text-gray-400 mb-3">Header rows and account info at the top of the file are automatically skipped.</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                ["Date","Date, Value Dt\n(DD/MM/YY or DD/MM/YYYY)"],
+                ["Description","Narration, Description,\nParticulars, Remarks"],
+                ["Debit / Out","Withdrawal Amt., Debit,\nWithdrawal"],
+                ["Credit / In","Deposit Amt., Credit,\nDeposit"]
+              ].map(([col,hint])=>(
+                <div key={col} className="bg-white rounded border px-3 py-2">
+                  <div className="text-xs font-semibold text-indigo-600">{col}</div>
+                  <div className="text-xs text-gray-400 mt-0.5 whitespace-pre-line">{hint}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 text-xs text-gray-400">✅ Tested with: HDFC Bank · SBI · ICICI · Axis · Kotak</div>
+          </div>
+        </div>
+      )}
+
+      {tab==="paste" && (
+        <div className="bg-white rounded-xl border shadow-sm p-5 mb-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-1">Paste CSV Text</h3>
+          <p className="text-xs text-gray-400 mb-3">Copy rows from your bank statement and paste below.</p>
+          <textarea className={`${inp} h-36 font-mono text-xs`} value={csv} onChange={e=>{setCsv(e.target.value);setDone(false);setErr("");}}
+            placeholder={"Date,Description,Debit,Credit\n01/03/2026,Amazon Purchase,1500,\n02/03/2026,Salary,,50000\n03/03/2026,Swiggy Order,350,"}/>
+          <button className={`${btnP} mt-3`} onClick={parsePaste}>Parse</button>
+        </div>
+      )}
+
+      {/* Preview table */}
+      {parsed.length>0 && (
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
+            <div>
+              <h3 className="font-semibold text-gray-700 text-sm">Preview — {parsed.length} transactions found</h3>
+              <p className="text-xs text-gray-400 mt-0.5">Edit categories before importing. Remove rows you don't want.</p>
+            </div>
+            <div className="flex gap-2 items-center flex-wrap">
+              <select className={`${inp} text-xs`} value={target} onChange={e=>setTarget(e.target.value)} style={{minWidth:180}}>
+                <option value="">Select destination account…</option>
+                {accounts.map(a=><option key={a.id} value={a.id}>{a.nickname||a.bankName}</option>)}
+              </select>
+              <button className={btnP} onClick={importAll} disabled={!target}>Import {parsed.length} Rows</button>
+            </div>
+          </div>
+
+          {/* Closing balance banner */}
+          {importedBalance!==null && (
+            <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2.5 mb-4">
+              <span className="text-emerald-600 text-lg">✅</span>
+              <div>
+                <span className="text-sm font-semibold text-emerald-700">Closing balance detected from statement: {fmt(importedBalance)}</span>
+                <p className="text-xs text-emerald-600 mt-0.5">Account balance will be set to <strong>{fmt(importedBalance)}</strong> after import — taken directly from the statement, not computed.</p>
+              </div>
+            </div>
+          )}
+
+          <Table cols={[
+            {k:"date",l:"Date",r:r=>fd(r.date)},
+            {k:"description",l:"Description",r:r=><span className="text-xs">{r.description}</span>},
+            {k:"cat",l:"Category",r:r=>(
+              <select className="border border-gray-200 rounded px-2 py-1 text-xs focus:ring-1 focus:ring-indigo-300 outline-none" value={r.category} onChange={e=>updCat(r.id,e.target.value)}>
+                {categories.map(c=><option key={c}>{c}</option>)}
+              </select>
+            )},
+            {k:"debit",l:"Debit",r:r=>r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""},
+            {k:"credit",l:"Credit",r:r=>r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""},
+            {k:"balance",l:"Balance",r:r=>r.balance?<span className="text-gray-500 text-xs font-mono">{fmt(r.balance)}</span>:""},
+            {k:"del",l:"",r:r=><button className="text-red-300 hover:text-red-500 text-xs" onClick={()=>delRow(r.id)} title="Remove row">✕</button>},
+          ]} rows={parsed}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   BILLS
+═══════════════════════════════════ */
+const BILL_CATS = [
+  "Electricity","Water","Gas","Internet","Mobile/Postpaid",
+  "Rent","Home Loan EMI","Car Loan EMI","Personal Loan EMI","Education Loan EMI","Credit Card EMI","Other EMI",
+  "Property Tax","Society Maintenance","Cable/DTH","Insurance Premium","School Fee","Other"
+];
+const BILL_FREQ = ["monthly","quarterly","yearly","one-time"];
+
+function Bills({bills,setBills,accounts,setAccounts,categories}) {
+  const [show,setShow]=useState(false);
+  const [form,setForm]=useState({freq:"monthly",status:"unpaid"});
+  const [filter,setFilter]=useState("all"); // all | unpaid | paid
+
+  const save=()=>{
+    if(!form.name||!form.amount) return;
+    const item={...form, id:form.id||uid(), amount:parseFloat(form.amount)||0};
+    setBills(p=>form.id ? p.map(b=>b.id===form.id?item:b) : [...p, item]);
+    setShow(false); setForm({freq:"monthly",status:"unpaid"});
+  };
+
+  const del=id=>setBills(p=>p.filter(b=>b.id!==id));
+
+  // Mark paid — optionally create a transaction in a bank account
+  const markPaid=(bill)=>{
+    setBills(p=>p.map(b=>{
+      if(b.id!==bill.id) return b;
+      const newEmis = b.totalEmis ? Math.min((parseInt(b.emisPaid)||0)+1, parseInt(b.totalEmis)) : b.emisPaid;
+      const allDone = b.totalEmis && newEmis >= parseInt(b.totalEmis);
+      return {...b, status:"paid", paidDate:tod(), emisPaid:newEmis, ...(allDone?{notes:(b.notes||"")+" ✅ Fully paid off"}:{})};
+    }));
+    // auto-create transaction if account linked
+    if(bill.accountId && bill.accountId!=="none") {
+      const txn={id:uid(),date:tod(),description:`Bill: ${bill.name}`,debit:bill.amount,credit:0,category:bill.category||"Bills",notes:"Bill payment"};
+      setAccounts(prev=>prev.map(a=>{
+        if(a.id!==bill.accountId) return a;
+        const txns=[...(a.transactions||[]),txn];
+        const bal=(parseFloat(a.openingBalance)||0)+txns.reduce((s,t)=>s+(t.credit||0)-(t.debit||0),0);
+        return {...a,transactions:txns,balance:bal};
+      }));
+    }
+  };
+
+  // Reset all paid→unpaid when next cycle starts (simple: just unmark manually via "Reset")
+  const resetBill=id=>setBills(p=>p.map(b=>b.id===id?{...b,status:"unpaid",paidDate:null}:b));
+
+  const today30 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  const visible = bills.filter(b=> filter==="all" || b.status===filter);
+  const totalUnpaid  = bills.filter(b=>b.status!=="paid").reduce((s,b)=>s+(b.amount||0),0);
+  const totalMonthly = bills.reduce((s,b)=>s+(b.freq==="yearly"?(b.amount||0)/12:b.freq==="quarterly"?(b.amount||0)/3:(b.amount||0)),0);
+  const overdueCount = bills.filter(b=>b.status!=="paid"&&b.dueDate&&b.dueDate<tod()).length;
+
+  const statusBadge = b => {
+    if(b.status==="paid") return <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">✓ Paid</span>;
+    if(b.dueDate && b.dueDate < tod()) return <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-600 font-medium">⚠ Overdue</span>;
+    if(b.dueDate && b.dueDate <= today30) return <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">Due soon</span>;
+    return <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">Unpaid</span>;
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">Bills</h1>
+        <button className={btnP} onClick={()=>{setForm({freq:"monthly",status:"unpaid"});setShow(true);}}>+ Add Bill</button>
+      </div>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <Card title="Total Bills" value={bills.length} icon="🧾" grad="indigo"/>
+        <Card title="Unpaid Amount" value={fmt(totalUnpaid)} sub={`${bills.filter(b=>b.status!=="paid").length} unpaid`} icon="💸" grad={totalUnpaid>0?"amber":"green"}/>
+        <Card title="Monthly Total" value={fmt(totalMonthly)} icon="📅" grad="purple"/>
+        <Card title="Overdue" value={overdueCount} icon="⚠️" grad={overdueCount>0?"red":"green"}/>
+      </div>
+
+      {/* Filters */}
+      <div className="flex gap-2 mb-4">
+        {["all","unpaid","paid"].map(f=>(
+          <button key={f} onClick={()=>setFilter(f)} className={`px-3 py-1.5 rounded-lg text-sm font-medium transition capitalize ${filter===f?"bg-indigo-600 text-white":"bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>{f}</button>
+        ))}
+      </div>
+
+      {/* Bills list */}
+      <div className="space-y-3">
+        {visible.map(b=>(
+          <div key={b.id} className={`bg-white rounded-xl border shadow-sm p-4 flex items-center gap-4 ${b.status!=="paid"&&b.dueDate&&b.dueDate<tod()?"border-red-200 bg-red-50/30":""}`}>
+            {/* Icon */}
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg flex-shrink-0 ${b.status==="paid"?"bg-green-100":"bg-indigo-50"}`}>
+              {b.status==="paid"?"✅":"🧾"}
+            </div>
+            {/* Info */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold text-gray-800 text-sm">{b.name}</span>
+                {statusBadge(b)}
+                <Tag color="gray">{b.category||"Bills"}</Tag>
+                <Tag color="purple">{b.freq}</Tag>
+              </div>
+              <div className="flex items-center gap-4 mt-1 text-xs text-gray-500 flex-wrap">
+                <span>Due: <strong className={b.dueDate&&b.dueDate<tod()&&b.status!=="paid"?"text-red-600":"text-gray-700"}>{fd(b.dueDate)||"—"}</strong></span>
+                {b.paidDate && <span>Paid: <strong className="text-green-600">{fd(b.paidDate)}</strong></span>}
+                {b.accountId&&b.accountId!=="none"&&accounts.find(a=>a.id===b.accountId)&&<span>→ {accounts.find(a=>a.id===b.accountId).nickname||accounts.find(a=>a.id===b.accountId).bankName}</span>}
+                {b.lender&&<span>🏦 {b.lender}</span>}
+                {b.totalEmis&&<span>EMI {b.emisPaid||0}/{b.totalEmis} ({Math.round(((b.emisPaid||0)/b.totalEmis)*100)}%)</span>}
+                {b.landlord&&<span>👤 {b.landlord}</span>}
+                {b.leaseEnd&&<span>Lease ends: {fd(b.leaseEnd)}</span>}
+                {b.notes&&<span className="text-gray-400 italic truncate max-w-xs">{b.notes}</span>}
+              </div>
+              {/* EMI progress bar */}
+              {b.totalEmis&&parseInt(b.totalEmis)>0&&(
+                <div className="mt-2">
+                  <div className="bg-gray-100 rounded-full h-1.5 w-48">
+                    <div className="bg-indigo-500 h-1.5 rounded-full" style={{width:`${Math.min(((b.emisPaid||0)/b.totalEmis)*100,100)}%`}}/>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Amount */}
+            <div className="text-right flex-shrink-0">
+              <div className="font-bold text-gray-800">{fmt(b.amount)}</div>
+              {b.freq!=="monthly"&&<div className="text-xs text-gray-400">{fmt(b.freq==="yearly"?b.amount/12:b.freq==="quarterly"?b.amount/3:b.amount)}/mo</div>}
+            </div>
+            {/* Actions */}
+            <div className="flex gap-1 flex-shrink-0">
+              {b.status!=="paid"
+                ? <button className="bg-green-50 hover:bg-green-100 text-green-700 text-xs px-3 py-1.5 rounded-lg font-medium transition" onClick={()=>markPaid(b)}>Mark Paid</button>
+                : <button className="bg-gray-50 hover:bg-gray-100 text-gray-500 text-xs px-3 py-1.5 rounded-lg font-medium transition" onClick={()=>resetBill(b.id)}>Reset</button>
+              }
+              <button className="text-indigo-400 hover:text-indigo-600 text-xs px-2 py-1.5 rounded-lg hover:bg-indigo-50 transition" onClick={()=>{setForm(b);setShow(true);}}>Edit</button>
+              <button className="text-red-300 hover:text-red-500 text-xs px-2 py-1.5 rounded-lg hover:bg-red-50 transition" onClick={()=>del(b.id)}>✕</button>
+            </div>
+          </div>
+        ))}
+        {!visible.length && <div className="text-center text-gray-400 py-16 text-sm">{filter==="all"?"No bills added yet — click \"+ Add Bill\" to get started.":`No ${filter} bills.`}</div>}
+      </div>
+
+      {/* Add/Edit Modal */}
+      <Modal open={show} onClose={()=>setShow(false)} title={form.id?"Edit Bill":"Add Bill"}>
+        <F label="Bill Name"><input className={inp} value={form.name||""} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Electricity Bill"/></F>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Category">
+            <select className={inp} value={form.category||""} onChange={e=>setForm({...form,category:e.target.value})}>
+              <option value="">Select…</option>
+              {BILL_CATS.map(c=><option key={c}>{c}</option>)}
+            </select>
+          </F>
+          <F label="Amount"><input type="number" className={inp} value={form.amount||""} onChange={e=>setForm({...form,amount:e.target.value})} placeholder="0"/></F>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <F label="Frequency">
+            <select className={inp} value={form.freq||"monthly"} onChange={e=>setForm({...form,freq:e.target.value})}>
+              {BILL_FREQ.map(f=><option key={f} value={f}>{f.charAt(0).toUpperCase()+f.slice(1)}</option>)}
+            </select>
+          </F>
+          <F label="Due Date"><input type="date" className={inp} value={form.dueDate||""} onChange={e=>setForm({...form,dueDate:e.target.value})}/></F>
+        </div>
+        {/* EMI-specific fields */}
+        {(form.category||"").toLowerCase().includes("emi") && (
+          <div className="bg-indigo-50 rounded-lg p-3 mb-1">
+            <div className="text-xs font-semibold text-indigo-600 mb-2">EMI Details</div>
+            <div className="grid grid-cols-3 gap-3">
+              <F label="Total EMIs"><input type="number" className={inp} value={form.totalEmis||""} onChange={e=>setForm({...form,totalEmis:e.target.value})} placeholder="e.g. 48"/></F>
+              <F label="EMI Paid"><input type="number" className={inp} value={form.emisPaid||""} onChange={e=>setForm({...form,emisPaid:e.target.value})} placeholder="0"/></F>
+              <F label="Interest Rate %"><input type="number" className={inp} value={form.interestRate||""} onChange={e=>setForm({...form,interestRate:e.target.value})} placeholder="e.g. 8.5"/></F>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <F label="Lender / Bank"><input className={inp} value={form.lender||""} onChange={e=>setForm({...form,lender:e.target.value})} placeholder="e.g. HDFC Bank"/></F>
+              <F label="Loan Amount"><input type="number" className={inp} value={form.loanAmount||""} onChange={e=>setForm({...form,loanAmount:e.target.value})} placeholder="Principal"/></F>
+            </div>
+          </div>
+        )}
+        {/* Rent-specific fields */}
+        {(form.category||"").toLowerCase()==="rent" && (
+          <div className="bg-amber-50 rounded-lg p-3 mb-1">
+            <div className="text-xs font-semibold text-amber-700 mb-2">Rent Details</div>
+            <div className="grid grid-cols-2 gap-3">
+              <F label="Landlord Name"><input className={inp} value={form.landlord||""} onChange={e=>setForm({...form,landlord:e.target.value})} placeholder="Name"/></F>
+              <F label="Lease End Date"><input type="date" className={inp} value={form.leaseEnd||""} onChange={e=>setForm({...form,leaseEnd:e.target.value})}/></F>
+            </div>
+          </div>
+        )}
+        <F label="Pay from Account (auto-records transaction when marked paid)">
+          <select className={inp} value={form.accountId||"none"} onChange={e=>setForm({...form,accountId:e.target.value})}>
+            <option value="none">— Don't record transaction —</option>
+            {accounts.map(a=><option key={a.id} value={a.id}>{a.nickname||a.bankName}</option>)}
+          </select>
+        </F>
+        <F label="Notes"><input className={inp} value={form.notes||""} onChange={e=>setForm({...form,notes:e.target.value})} placeholder="Optional"/></F>
+        <div className="flex gap-2 pt-1">
+          <button className={btnP} onClick={save}>Save</button>
+          <button className={btnS} onClick={()=>setShow(false)}>Cancel</button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   REPORTS
+═══════════════════════════════════ */
+function Reports({accounts,cards,investments,subscriptions,bills,income}) {
+  const [tab,setTab]=useState("cashflow");
+
+  /* ── All transactions ── */
+  const allT=[
+    ...accounts.flatMap(a=>(a.transactions||[]).map(t=>({...t}))),
+    ...cards.flatMap(c=>(c.transactions||[]).map(t=>({...t})))
+  ].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+
+  /* ── This month ── */
+  const thisM=tod().slice(0,7);
+  const mT=allT.filter(t=>mk(t.date)===thisM);
+  const mInc=mT.reduce((s,t)=>s+(t.credit||0),0);
+  const mExp=mT.reduce((s,t)=>s+(t.debit||0),0);
+  const mSav=mInc-mExp;
+  const savR=mInc>0?((mSav/mInc)*100).toFixed(1):0;
+
+  /* ── 12-month trend ── */
+  const trend12=[];
+  for(let i=11;i>=0;i--){
+    const d=new Date(); d.setMonth(d.getMonth()-i);
+    const m=d.toISOString().slice(0,7);
+    const lb=d.toLocaleDateString("en-IN",{month:"short",year:"2-digit"});
+    const inc=allT.filter(t=>mk(t.date)===m).reduce((s,t)=>s+(t.credit||0),0);
+    const exp=allT.filter(t=>mk(t.date)===m).reduce((s,t)=>s+(t.debit||0),0);
+    trend12.push({name:lb,income:inc,expenses:exp,savings:Math.max(inc-exp,0)});
+  }
+
+  /* ── Expense by category ── */
+  const catMap={};
+  mT.forEach(t=>{if(t.debit>0){const c=t.category||"Misc";catMap[c]=(catMap[c]||0)+t.debit;}});
+  const catArr=Object.entries(catMap).sort((a,b)=>b[1]-a[1]);
+  const catPie=catArr.map(([name,value])=>({name,value}));
+  const catMapAll={};
+  allT.forEach(t=>{if(t.debit>0){const c=t.category||"Misc";catMapAll[c]=(catMapAll[c]||0)+t.debit;}});
+  const catArrAll=Object.entries(catMapAll).sort((a,b)=>b[1]-a[1]);
+  const allTimeSpent=allT.reduce((s,t)=>s+(t.debit||0),0);
+  const topExp=mT.filter(t=>t.debit>0).sort((a,b)=>(b.debit||0)-(a.debit||0)).slice(0,10);
+
+  /* ── Investments ── */
+  const sv=investments.shares.reduce((s,x)=>s+(x.currentPrice||x.purchasePrice)*x.quantity,0);
+  const sc=investments.shares.reduce((s,x)=>s+x.purchasePrice*x.quantity,0);
+  const mv=investments.mutualFunds.reduce((s,x)=>s+(x.currentNav||x.purchaseNav)*x.units,0);
+  const mc=investments.mutualFunds.reduce((s,x)=>s+x.purchaseNav*x.units,0);
+  const iv=investments.insurance.reduce((s,x)=>s+(x.sumAssured||0),0);
+  const invTotal=sv+mv; const invCost=sc+mc; const invPnL=invTotal-invCost;
+  const invPnLPct=invCost>0?((invPnL/invCost)*100).toFixed(1):0;
+  const invPie=[{name:"Shares",value:sv},{name:"Mutual Funds",value:mv},{name:"Insurance (SA)",value:iv}].filter(d=>d.value>0);
+
+  /* ── Bills ── */
+  const billList=bills||[];
+  const billPaid=billList.filter(b=>b.status==="paid");
+  const billUnpaid=billList.filter(b=>b.status!=="paid");
+  const billTotal=billList.reduce((s,b)=>s+(b.amount||0),0);
+  const billCatMap={};
+  billList.forEach(b=>{const c=b.category||"Other";billCatMap[c]=(billCatMap[c]||0)+(b.amount||0);});
+  const billCatArr=Object.entries(billCatMap).sort((a,b)=>b[1]-a[1]);
+  const billCatPie=billCatArr.map(([name,value])=>({name,value}));
+  const monthlyBills=billList.reduce((s,b)=>s+(b.freq==="yearly"?(b.amount||0)/12:b.freq==="quarterly"?(b.amount||0)/3:(b.amount||0)),0);
+  const emiList=billList.filter(b=>b.totalEmis);
+
+  /* ── Income module ── */
+  const incomeList=income||[];
+  const incReceived=incomeList.filter(x=>x.status==="received");
+  const incPending=incomeList.filter(x=>x.status==="expected");
+  const incRecTotal=incReceived.reduce((s,x)=>s+(x.amount||0),0);
+  const incPendTotal=incPending.reduce((s,x)=>s+(x.amount||0),0);
+  const incMonthly=incomeList.reduce((s,x)=>{
+    const m=x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+    return s+m;
+  },0);
+  const incCatMap={};
+  incomeList.forEach(x=>{
+    const m=x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+    incCatMap[x.category]=(incCatMap[x.category]||0)+m;
+  });
+  const incCatPie=Object.entries(incCatMap).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+
+  /* ── Net worth ── */
+  const bankBal=accounts.reduce((s,a)=>s+(a.balance||0),0);
+  const cardOut=cards.reduce((s,c)=>s+(c.outstanding||0),0);
+  const netWorth=bankBal+invTotal+iv-cardOut;
+  const netWorthPie=[
+    {name:"Bank Balances",value:bankBal},{name:"Shares",value:sv},
+    {name:"Mutual Funds",value:mv},{name:"Insurance (SA)",value:iv},
+  ].filter(d=>d.value>0);
+
+  /* ── Subscriptions ── */
+  const ms=subscriptions.reduce((s,x)=>s+(x.cycle==="yearly"?(x.amount||0)/12:(x.amount||0)),0);
+
+  const TABS=[
+    {id:"cashflow",l:"💹 Cash Flow"},{id:"expenses",l:"📤 Expenses"},
+    {id:"income_report",l:"💵 Income"},{id:"bills_report",l:"🧾 Bills & EMI"},
+    {id:"investment",l:"📈 Investments"},{id:"networth",l:"💰 Net Worth"},
+    {id:"subscription",l:"🔄 Subscriptions"},
+  ];
+
+  const TabBtn=({id,l})=>(
+    <button onClick={()=>setTab(id)} className={`px-3.5 py-2 rounded-lg text-xs font-medium transition whitespace-nowrap ${tab===id?"bg-indigo-600 text-white shadow-sm":"bg-white text-gray-600 hover:bg-gray-100 border border-gray-200"}`}>{l}</button>
+  );
+
+  return (
+    <div>
+      <h1 className="text-xl font-bold text-gray-800 mb-4">Reports &amp; Analytics</h1>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {TABS.map(t=><TabBtn key={t.id} id={t.id} l={t.l}/>)}
+      </div>
+
+      {/* ─── CASH FLOW ─── */}
+      {tab==="cashflow" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="This Month Income" value={fmt(mInc)} icon="📥" grad="green"/>
+            <Card title="This Month Expenses" value={fmt(mExp)} icon="📤" grad="red"/>
+            <Card title="Net Savings" value={fmt(mSav)} icon="💰" grad={mSav>=0?"indigo":"red"}/>
+            <Card title="Savings Rate" value={savR+"%"} icon="📊" grad="purple"/>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <h3 className="font-semibold text-gray-700 text-sm mb-4">Income vs Expenses — Last 12 Months</h3>
+            <BarChart data={trend12} keys={["income","expenses"]} colors={["#10b981","#ef4444"]}/>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <h3 className="font-semibold text-gray-700 text-sm mb-4">Monthly Savings Trend</h3>
+            <BarChart data={trend12} keys={["savings"]} colors={["#6366f1"]}/>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <h3 className="font-semibold text-gray-700 text-sm mb-4">Month-by-Month Summary</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="border-b bg-gray-50">
+                  <th className="text-left px-3 py-2.5 text-xs font-semibold text-gray-600">Month</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-600">Income</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-600">Expenses</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-600">Savings</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-600">Rate</th>
+                </tr></thead>
+                <tbody>
+                  {trend12.map((r,i)=>{
+                    const s=r.income-r.expenses;
+                    const p=r.income>0?((s/r.income)*100).toFixed(1):0;
+                    return (
+                      <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="px-3 py-2.5 font-medium text-gray-700">{r.name}</td>
+                        <td className="px-3 py-2.5 text-right text-green-600 font-medium">{fmt(r.income)}</td>
+                        <td className="px-3 py-2.5 text-right text-red-500 font-medium">{fmt(r.expenses)}</td>
+                        <td className={`px-3 py-2.5 text-right font-semibold ${s>=0?"text-indigo-600":"text-red-600"}`}>{fmt(s)}</td>
+                        <td className={`px-3 py-2.5 text-right text-xs font-medium ${p>=0?"text-indigo-500":"text-red-500"}`}>{p}%</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── EXPENSES ─── */}
+      {tab==="expenses" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="This Month" value={fmt(mExp)} icon="📤" grad="red"/>
+            <Card title="Avg Monthly (12m)" value={fmt(Math.round(trend12.reduce((s,r)=>s+r.expenses,0)/12))} icon="📊" grad="amber"/>
+            <Card title="Top Category" value={catArr[0]?catArr[0][0]:"—"} icon="🏷️" grad="purple"/>
+            <Card title="All-time Spent" value={fmt(allTimeSpent)} icon="💸" grad="indigo"/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">This Month — by Category</h3>
+              <PieChart data={catPie}/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-4">Category Bars</h3>
+              {catArr.length>0?(
+                <div className="space-y-2.5">
+                  {catArr.map(([cat,amt],i)=>(
+                    <div key={cat} className="flex items-center gap-3">
+                      <div className="w-28 text-xs text-gray-600 truncate">{cat}</div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-5">
+                        <div className="h-5 rounded-full flex items-center pl-2 text-xs text-white font-medium"
+                          style={{width:`${Math.max((amt/mExp)*100,4)}%`,background:COLORS[i%COLORS.length]}}>{fmt(amt)}</div>
+                      </div>
+                      <div className="w-8 text-right text-xs text-gray-400">{((amt/mExp)*100).toFixed(0)}%</div>
+                    </div>
+                  ))}
+                </div>
+              ):<div className="text-gray-400 text-center py-8 text-sm">No expenses this month</div>}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <h3 className="font-semibold text-gray-700 text-sm mb-3">Top 10 Expenses This Month</h3>
+            {topExp.length>0?(
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b bg-gray-50">
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-600">Date</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-600">Description</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-600">Category</th>
+                    <th className="text-right px-3 py-2 text-xs font-semibold text-gray-600">Amount</th>
+                  </tr></thead>
+                  <tbody>
+                    {topExp.map(t=>(
+                      <tr key={t.id} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{fd(t.date)}</td>
+                        <td className="px-3 py-2 text-gray-700 max-w-xs truncate">{t.description}</td>
+                        <td className="px-3 py-2"><span className="bg-red-50 text-red-600 text-xs px-2 py-0.5 rounded-full">{t.category||"Misc"}</span></td>
+                        <td className="px-3 py-2 text-right font-semibold text-red-600">{fmt(t.debit)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ):<div className="text-gray-400 text-center py-8 text-sm">No expenses this month</div>}
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <h3 className="font-semibold text-gray-700 text-sm mb-4">All-time by Category</h3>
+            <div className="space-y-2">
+              {catArrAll.slice(0,12).map(([cat,amt],i)=>(
+                <div key={cat} className="flex items-center gap-3">
+                  <div className="w-28 text-xs text-gray-600 truncate">{cat}</div>
+                  <div className="flex-1 bg-gray-100 rounded-full h-4">
+                    <div className="h-4 rounded-full" style={{width:`${allTimeSpent>0?Math.max((amt/allTimeSpent)*100,1):0}%`,background:COLORS[i%COLORS.length]}}></div>
+                  </div>
+                  <div className="w-24 text-right text-xs font-medium text-gray-700">{fmt(amt)}</div>
+                  <div className="w-8 text-right text-xs text-gray-400">{allTimeSpent>0?((amt/allTimeSpent)*100).toFixed(0):0}%</div>
+                </div>
+              ))}
+              {catArrAll.length===0&&<div className="text-gray-400 text-center py-8 text-sm">No transactions yet</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── INCOME ─── */}
+      {tab==="income_report" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="Monthly Expected" value={fmt(incMonthly)} icon="📅" grad="green"/>
+            <Card title="Annual Expected" value={fmt(incMonthly*12)} icon="📆" grad="cyan"/>
+            <Card title="Total Received" value={fmt(incRecTotal)} icon="✅" grad="indigo"/>
+            <Card title="Pending" value={fmt(incPendTotal)} icon="⏳" grad="amber"/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Income by Source (Monthly)</h3>
+              <PieChart data={incCatPie}/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Source Breakdown</h3>
+              {incCatPie.length>0?(
+                <div className="space-y-2.5">
+                  {incCatPie.map((c,i)=>(
+                    <div key={c.name} className="flex items-center gap-3">
+                      <div className="w-32 text-xs text-gray-600 truncate">{c.name}</div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-5">
+                        <div className="h-5 rounded-full flex items-center pl-2 text-xs text-white font-medium"
+                          style={{width:`${incMonthly>0?Math.max((c.value/incMonthly)*100,4):0}%`,background:COLORS[i%COLORS.length]}}>{fmt(c.value)}/mo</div>
+                      </div>
+                      <div className="w-8 text-right text-xs text-gray-400">{incMonthly>0?((c.value/incMonthly)*100).toFixed(0):0}%</div>
+                    </div>
+                  ))}
+                </div>
+              ):<div className="text-gray-400 text-center py-8 text-sm">No income sources added yet</div>}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b bg-gray-50 flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700 text-sm">All Income Sources</h3>
+              <div className="text-xs text-gray-400">{incReceived.length} received · {incPending.length} pending</div>
+            </div>
+            <table className="w-full text-sm">
+              <thead><tr className="border-b">
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Name</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Category</th>
+                <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Amount</th>
+                <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Monthly</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Frequency</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Status</th>
+              </tr></thead>
+              <tbody>
+                {incomeList.map(x=>{
+                  const monthly=x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+                  return (
+                    <tr key={x.id} className="border-b last:border-0 hover:bg-gray-50">
+                      <td className="px-4 py-2.5 font-medium text-gray-800">{x.name}</td>
+                      <td className="px-4 py-2.5 text-gray-600">{x.category}</td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-green-700">{fmt(x.amount)}</td>
+                      <td className="px-4 py-2.5 text-right text-xs text-gray-500">{fmt(monthly)}/mo</td>
+                      <td className="px-4 py-2.5 capitalize text-gray-600">{x.freq}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${x.status==="received"?"bg-green-100 text-green-700":"bg-amber-100 text-amber-700"}`}>
+                          {x.status==="received"?"✓ Received":"⏳ Pending"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {incomeList.length===0&&<tr><td colSpan="6" className="text-center text-gray-400 py-10 text-sm">No income sources yet</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ─── BILLS & EMI ─── */}
+      {tab==="bills_report" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="Monthly Bills" value={fmt(monthlyBills)} icon="🧾" grad="amber"/>
+            <Card title="Annual Bills" value={fmt(monthlyBills*12)} icon="📆" grad="red"/>
+            <Card title="Paid / Total" value={`${billPaid.length} / ${billList.length}`} icon="✅" grad="green"/>
+            <Card title="Unpaid Amount" value={fmt(billUnpaid.reduce((s,b)=>s+(b.amount||0),0))} icon="⚠️" grad="red"/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Bills by Category</h3>
+              <PieChart data={billCatPie}/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Category Amounts</h3>
+              {billCatArr.length>0?(
+                <div className="space-y-2.5">
+                  {billCatArr.map(([cat,amt],i)=>(
+                    <div key={cat} className="flex items-center gap-3">
+                      <div className="w-32 text-xs text-gray-600 truncate">{cat}</div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-5">
+                        <div className="h-5 rounded-full flex items-center pl-2 text-xs text-white font-medium"
+                          style={{width:`${billTotal>0?Math.max((amt/billTotal)*100,4):0}%`,background:COLORS[i%COLORS.length]}}>{fmt(amt)}</div>
+                      </div>
+                      <div className="w-8 text-right text-xs text-gray-400">{billTotal>0?((amt/billTotal)*100).toFixed(0):0}%</div>
+                    </div>
+                  ))}
+                </div>
+              ):<div className="text-gray-400 text-center py-8 text-sm">No bills added yet</div>}
+            </div>
+          </div>
+          {emiList.length>0&&(
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-4">EMI Progress Tracker</h3>
+              <div className="space-y-4">
+                {emiList.map(b=>{
+                  const paid=parseInt(b.emisPaid)||0;
+                  const total=parseInt(b.totalEmis)||1;
+                  const pct=Math.round((paid/total)*100);
+                  const remaining=(total-paid)*(b.amount||0);
+                  return (
+                    <div key={b.id}>
+                      <div className="flex justify-between text-xs mb-1.5">
+                        <span className="font-semibold text-gray-700">{b.name}</span>
+                        <span className="text-gray-500">{paid}/{total} EMIs · {fmt(b.amount)}/mo</span>
+                      </div>
+                      <div className="bg-gray-100 rounded-full h-3">
+                        <div className="h-3 rounded-full bg-indigo-500 transition-all" style={{width:`${pct}%`}}></div>
+                      </div>
+                      <div className="flex justify-between text-xs mt-1">
+                        <span className="text-indigo-500 font-medium">{pct}% paid off</span>
+                        <span className="text-gray-400">Remaining: {fmt(remaining)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b bg-gray-50 flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700 text-sm">All Bills</h3>
+              <div className="text-xs text-gray-400">{billPaid.length} paid · {billUnpaid.length} pending</div>
+            </div>
+            <table className="w-full text-sm">
+              <thead><tr className="border-b">
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Name</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Category</th>
+                <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Amount</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Frequency</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Due Date</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Status</th>
+              </tr></thead>
+              <tbody>
+                {billList.map(b=>(
+                  <tr key={b.id} className="border-b last:border-0 hover:bg-gray-50">
+                    <td className="px-4 py-2.5 font-medium text-gray-800">{b.name}</td>
+                    <td className="px-4 py-2.5 text-gray-600">{b.category}</td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-amber-700">{fmt(b.amount)}</td>
+                    <td className="px-4 py-2.5 capitalize text-gray-600">{b.freq}</td>
+                    <td className="px-4 py-2.5 text-xs text-gray-500">{b.dueDate?fd(b.dueDate):"—"}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${b.status==="paid"?"bg-green-100 text-green-700":"bg-red-100 text-red-600"}`}>
+                        {b.status==="paid"?"✓ Paid":"Unpaid"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {billList.length===0&&<tr><td colSpan="6" className="text-center text-gray-400 py-10 text-sm">No bills yet</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ─── INVESTMENTS ─── */}
+      {tab==="investment" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="Total Portfolio" value={fmt(invTotal)} icon="💼" grad="indigo"/>
+            <Card title="Cost Basis" value={fmt(invCost)} icon="📥" grad="amber"/>
+            <Card title="Total P&amp;L" value={`${invPnL>=0?"+":""}${fmt(invPnL)}`} icon={invPnL>=0?"📈":"📉"} grad={invPnL>=0?"green":"red"}/>
+            <Card title="Return %" value={`${invPnL>=0?"+":""}${invPnLPct}%`} icon="🎯" grad={invPnL>=0?"green":"red"}/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Portfolio Allocation</h3>
+              <PieChart data={invPie} donut/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Insurance Policies</h3>
+              <div className="text-2xl font-bold text-amber-600 mb-3">{fmt(iv)} <span className="text-sm font-normal text-gray-400">total coverage</span></div>
+              <div className="space-y-2">
+                {investments.insurance.map(p=>(
+                  <div key={p.id} className="flex justify-between items-center border-b pb-2 last:border-0">
+                    <div>
+                      <div className="text-sm font-medium text-gray-800">{p.policyName}</div>
+                      <div className="text-xs text-gray-400">{p.company} · {p.type}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm font-semibold text-amber-600">{fmt(p.sumAssured)}</div>
+                      <div className="text-xs text-gray-400">Sum Assured</div>
+                    </div>
+                  </div>
+                ))}
+                {!investments.insurance.length&&<div className="text-gray-400 text-sm text-center py-6">No insurance added</div>}
+              </div>
+            </div>
+          </div>
+          {investments.shares.length>0&&(
+            <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+              <div className="px-5 py-3 border-b bg-gray-50"><h3 className="font-semibold text-gray-700 text-sm">Shares Holdings</h3></div>
+              <table className="w-full text-sm">
+                <thead><tr className="border-b">
+                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Stock</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Qty</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Buy Price</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Current</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Value</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">P&amp;L</th>
+                </tr></thead>
+                <tbody>
+                  {investments.shares.map(s=>{
+                    const cur=s.currentPrice||s.purchasePrice;
+                    const val=cur*s.quantity; const cost=s.purchasePrice*s.quantity;
+                    const pnl=val-cost; const pp=cost>0?((pnl/cost)*100).toFixed(1):0;
+                    return (
+                      <tr key={s.id} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="px-4 py-2.5 font-medium text-gray-800">{s.symbol||s.name}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{s.quantity}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{fmt(s.purchasePrice)}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{fmt(cur)}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-indigo-600">{fmt(val)}</td>
+                        <td className={`px-4 py-2.5 text-right font-semibold ${pnl>=0?"text-green-600":"text-red-600"}`}>{pnl>=0?"+":""}{fmt(pnl)} <span className="text-xs font-normal">({pp}%)</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {investments.mutualFunds.length>0&&(
+            <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+              <div className="px-5 py-3 border-b bg-gray-50"><h3 className="font-semibold text-gray-700 text-sm">Mutual Funds</h3></div>
+              <table className="w-full text-sm">
+                <thead><tr className="border-b">
+                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-gray-600">Fund</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Units</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Buy NAV</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Current NAV</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">Value</th>
+                  <th className="text-right px-4 py-2.5 text-xs font-semibold text-gray-600">P&amp;L</th>
+                </tr></thead>
+                <tbody>
+                  {investments.mutualFunds.map(f=>{
+                    const cur=f.currentNav||f.purchaseNav;
+                    const val=cur*f.units; const cost=f.purchaseNav*f.units;
+                    const pnl=val-cost; const pp=cost>0?((pnl/cost)*100).toFixed(1):0;
+                    return (
+                      <tr key={f.id} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="px-4 py-2.5 font-medium text-gray-800 max-w-xs truncate">{f.name}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{f.units}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{fmt(f.purchaseNav)}</td>
+                        <td className="px-4 py-2.5 text-right text-gray-600">{fmt(cur)}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-indigo-600">{fmt(val)}</td>
+                        <td className={`px-4 py-2.5 text-right font-semibold ${pnl>=0?"text-green-600":"text-red-600"}`}>{pnl>=0?"+":""}{fmt(pnl)} <span className="text-xs font-normal">({pp}%)</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── NET WORTH ─── */}
+      {tab==="networth" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <Card title="Net Worth" value={fmt(netWorth)} icon="💰" grad="indigo"/>
+            <Card title="Total Assets" value={fmt(bankBal+invTotal+iv)} icon="🏦" grad="green"/>
+            <Card title="Total Liabilities" value={fmt(cardOut)} icon="💳" grad="red"/>
+            <Card title="Debt Free?" value={cardOut===0?"✓ Yes":"✗ No"} icon="🎯" grad={cardOut===0?"green":"amber"}/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Asset Allocation</h3>
+              <PieChart data={netWorthPie} donut/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Balance Sheet</h3>
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Assets</div>
+                {accounts.map(a=>(
+                  <div key={a.id} className="flex justify-between text-sm py-1 border-b border-gray-50">
+                    <span className="text-gray-600">{a.bankName}{a.nickname?` (${a.nickname})`:""}</span>
+                    <span className="font-medium text-green-700">{fmt(a.balance)}</span>
+                  </div>
+                ))}
+                {sv>0&&<div className="flex justify-between text-sm py-1 border-b border-gray-50"><span className="text-gray-600">Shares Portfolio</span><span className="font-medium text-green-700">{fmt(sv)}</span></div>}
+                {mv>0&&<div className="flex justify-between text-sm py-1 border-b border-gray-50"><span className="text-gray-600">Mutual Funds</span><span className="font-medium text-green-700">{fmt(mv)}</span></div>}
+                {iv>0&&<div className="flex justify-between text-sm py-1 border-b border-gray-50"><span className="text-gray-600">Insurance (Sum Assured)</span><span className="font-medium text-green-700">{fmt(iv)}</span></div>}
+                <div className="flex justify-between text-sm py-1.5 font-semibold text-green-700 border-t border-green-100">
+                  <span>Total Assets</span><span>{fmt(bankBal+invTotal+iv)}</span>
+                </div>
+                <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-3 mb-2">Liabilities</div>
+                {cards.map(c=>(
+                  <div key={c.id} className="flex justify-between text-sm py-1 border-b border-gray-50">
+                    <span className="text-gray-600">{c.cardName} (Credit Card)</span>
+                    <span className="font-medium text-red-600">{fmt(c.outstanding)}</span>
+                  </div>
+                ))}
+                {cards.length===0&&<div className="text-gray-400 text-sm py-1">No liabilities recorded</div>}
+                <div className="flex justify-between text-sm py-1.5 font-semibold text-red-600 border-t border-red-100">
+                  <span>Total Liabilities</span><span>{fmt(cardOut)}</span>
+                </div>
+                <div className="flex justify-between text-base py-2 font-bold border-t-2 border-indigo-200 text-indigo-700 mt-2">
+                  <span>Net Worth</span><span>{fmt(netWorth)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── SUBSCRIPTIONS ─── */}
+      {tab==="subscription" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-3 gap-3">
+            <Card title="Monthly Cost" value={fmt(ms)} icon="📅" grad="amber"/>
+            <Card title="Annual Cost" value={fmt(ms*12)} icon="📆" grad="red"/>
+            <Card title="Active" value={subscriptions.length} icon="🔄" grad="indigo"/>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Cost Distribution</h3>
+              <PieChart data={subscriptions.map(s=>({name:s.name,value:s.cycle==="yearly"?(s.amount||0)/12:(s.amount||0)}))}/>
+            </div>
+            <div className="bg-white rounded-xl border shadow-sm p-5">
+              <h3 className="font-semibold text-gray-700 text-sm mb-3">Monthly Cost Breakdown</h3>
+              <div className="space-y-2">
+                {[...subscriptions].sort((a,b)=>{
+                  const am=a.cycle==="yearly"?(a.amount||0)/12:(a.amount||0);
+                  const bm=b.cycle==="yearly"?(b.amount||0)/12:(b.amount||0);
+                  return bm-am;
+                }).map(s=>{
+                  const mo=s.cycle==="yearly"?(s.amount||0)/12:(s.amount||0);
+                  return (
+                    <div key={s.id} className="flex items-center gap-3">
+                      <div className="w-28 text-xs text-gray-600 truncate">{s.name}</div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-4">
+                        <div className="h-4 rounded-full bg-amber-400" style={{width:`${ms>0?Math.max((mo/ms)*100,2):0}%`}}></div>
+                      </div>
+                      <div className="w-20 text-right text-xs font-medium text-gray-700">{fmt(mo)}/mo</div>
+                    </div>
+                  );
+                })}
+                {!subscriptions.length&&<div className="text-gray-400 text-center py-8 text-sm">No subscriptions yet</div>}
+              </div>
+            </div>
+          </div>
+          <div className="bg-white rounded-xl border shadow-sm p-5">
+            <Table cols={[
+              {k:"name",l:"Name"},{k:"amount",l:"Amount",r:r=>fmt(r.amount)},{k:"cycle",l:"Cycle"},
+              {k:"mc",l:"Monthly Cost",r:r=>fmt(r.cycle==="yearly"?(r.amount||0)/12:(r.amount||0))},
+              {k:"rd",l:"Next Renewal",r:r=>fd(r.renewalDate)},
+            ]} rows={subscriptions} empty="No subscriptions"/>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   INCOME
+═══════════════════════════════════ */
+const INCOME_CATS = ["Salary","Rental Income","Freelance / Consulting","Dividend","Interest","Business Income","Capital Gains","Bonus","Pension","Other"];
+const INCOME_FREQ = ["monthly","quarterly","yearly","one-time"];
+
+function Income({income,setIncome,accounts,setAccounts}) {
+  const [showForm,setShowForm]=useState(false);
+  const [form,setForm]=useState({});
+  const [filter,setFilter]=useState("all");
+  const [selCat,setSelCat]=useState("all");
+
+  const fi = f=>setForm(p=>({...p,...f}));
+
+  const save=()=>{
+    if(!form.name||!form.amount) return;
+    const entry={
+      id:form.id||uid(),
+      name:form.name,
+      category:form.category||"Salary",
+      amount:parseFloat(form.amount)||0,
+      freq:form.freq||"monthly",
+      expectedDate:form.expectedDate||"",
+      receivedDate:form.receivedDate||"",
+      status:form.status||"expected",
+      accountId:form.accountId||"none",
+      notes:form.notes||"",
+    };
+    if(form.id){
+      setIncome(p=>p.map(x=>x.id===form.id?entry:x));
+    } else {
+      setIncome(p=>[...p,entry]);
+    }
+    setShowForm(false); setForm({});
+  };
+
+  const markReceived=(item)=>{
+    setIncome(p=>p.map(x=>{
+      if(x.id!==item.id) return x;
+      return {...x,status:"received",receivedDate:x.receivedDate||tod()};
+    }));
+    // Auto-create credit transaction in linked account
+    if(item.accountId && item.accountId!=="none") {
+      setAccounts(p=>p.map(a=>{
+        if(a.id!==item.accountId) return a;
+        const txn={id:uid(),date:tod(),description:`Income: ${item.name}`,credit:item.amount||0,debit:0,category:"Income",notes:"Auto from Income"};
+        const newBal=(parseFloat(a.balance)||0)+(item.amount||0);
+        return {...a,balance:newBal,transactions:[...(a.transactions||[]),txn]};
+      }));
+    }
+  };
+
+  const del=id=>setIncome(p=>p.filter(x=>x.id!==id));
+
+  const filtered=income.filter(x=>{
+    const statusOk = filter==="all"||x.status===filter;
+    const catOk = selCat==="all"||x.category===selCat;
+    return statusOk&&catOk;
+  });
+
+  // Summary stats
+  const totalMonthly=income.reduce((s,x)=>{
+    const m=x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+    return s+m;
+  },0);
+  const totalAnnual=income.reduce((s,x)=>{
+    const a=x.freq==="monthly"?(x.amount||0)*12:x.freq==="quarterly"?(x.amount||0)*4:(x.amount||0);
+    return s+a;
+  },0);
+  const totalReceived=income.filter(x=>x.status==="received").reduce((s,x)=>s+(x.amount||0),0);
+  const totalPending=income.filter(x=>x.status==="expected").reduce((s,x)=>s+(x.amount||0),0);
+
+  // Category breakdown
+  const catBreak={};
+  income.forEach(x=>{
+    const m=x.freq==="yearly"?(x.amount||0)/12:x.freq==="quarterly"?(x.amount||0)/3:x.freq==="one-time"?0:(x.amount||0);
+    catBreak[x.category]=(catBreak[x.category]||0)+m;
+  });
+  const catPie=Object.entries(catBreak).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">Income</h1>
+        <button className={btnP} onClick={()=>{setForm({status:"expected",freq:"monthly",category:"Salary"});setShowForm(true);}}>+ Add Income Source</button>
+      </div>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-6">
+        <Card title="Monthly Expected" value={fmt(totalMonthly)} icon="📅" grad="green"/>
+        <Card title="Annual Expected" value={fmt(totalAnnual)} icon="📆" grad="teal"/>
+        <Card title="Total Received" value={fmt(totalReceived)} icon="✅" grad="indigo"/>
+        <Card title="Pending Income" value={fmt(totalPending)} icon="⏳" grad="amber"/>
+      </div>
+
+      {/* Charts + form */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Monthly Income by Source</h3>
+          {catPie.length>0 ? <PieChart data={catPie}/> : <div className="text-gray-400 text-sm text-center py-10">No income sources yet</div>}
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-3">Category Breakdown</h3>
+          <div className="space-y-2">
+            {catPie.map(c=>(
+              <div key={c.name} className="flex items-center gap-2">
+                <div className="w-28 text-xs text-gray-600 truncate">{c.name}</div>
+                <div className="flex-1 bg-gray-100 rounded-full h-2">
+                  <div className="bg-green-500 h-2 rounded-full" style={{width:`${totalMonthly>0?Math.round(c.value/totalMonthly*100):0}%`}}></div>
+                </div>
+                <div className="w-20 text-right text-xs font-medium text-gray-700">{fmt(c.value)}/mo</div>
+              </div>
+            ))}
+            {catPie.length===0 && <div className="text-gray-400 text-sm text-center py-8">Add income sources to see breakdown</div>}
+          </div>
+        </div>
+      </div>
+
+      {/* Add/Edit Form */}
+      {showForm && (
+        <div className="bg-white rounded-xl border shadow-sm p-5 mb-5">
+          <h3 className="font-semibold text-gray-700 text-sm mb-4">{form.id?"Edit":"Add"} Income Source</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+            <div>
+              <label className={lbl}>Name / Description</label>
+              <input className={inp} placeholder="e.g. Monthly Salary, Rental — Flat 2A" value={form.name||""} onChange={e=>fi({name:e.target.value})}/>
+            </div>
+            <div>
+              <label className={lbl}>Category</label>
+              <select className={inp} value={form.category||"Salary"} onChange={e=>fi({category:e.target.value})}>
+                {INCOME_CATS.map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={lbl}>Amount (₹)</label>
+              <input className={inp} type="number" placeholder="0" value={form.amount||""} onChange={e=>fi({amount:e.target.value})}/>
+            </div>
+            <div>
+              <label className={lbl}>Frequency</label>
+              <select className={inp} value={form.freq||"monthly"} onChange={e=>fi({freq:e.target.value})}>
+                {INCOME_FREQ.map(f=><option key={f}>{f}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={lbl}>Expected Date</label>
+              <input className={inp} type="date" value={form.expectedDate||""} onChange={e=>fi({expectedDate:e.target.value})}/>
+            </div>
+            <div>
+              <label className={lbl}>Status</label>
+              <select className={inp} value={form.status||"expected"} onChange={e=>fi({status:e.target.value})}>
+                <option value="expected">Expected</option>
+                <option value="received">Received</option>
+              </select>
+            </div>
+            {form.status==="received" && (
+              <div>
+                <label className={lbl}>Received Date</label>
+                <input className={inp} type="date" value={form.receivedDate||""} onChange={e=>fi({receivedDate:e.target.value})}/>
+              </div>
+            )}
+            <div>
+              <label className={lbl}>Linked Bank Account</label>
+              <select className={inp} value={form.accountId||"none"} onChange={e=>fi({accountId:e.target.value})}>
+                <option value="none">— None —</option>
+                {accounts.map(a=><option key={a.id} value={a.id}>{a.bankName}{a.accountNumber?" ···"+a.accountNumber.slice(-4):""}</option>)}
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className={lbl}>Notes</label>
+              <input className={inp} placeholder="Optional notes" value={form.notes||""} onChange={e=>fi({notes:e.target.value})}/>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button className={btnP} onClick={save}>Save</button>
+            <button className={btnS} onClick={()=>{setShowForm(false);setForm({});}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Filter bar */}
+      <div className="flex flex-wrap gap-2 mb-4 items-center">
+        <span className="text-xs text-gray-500 font-medium">Filter:</span>
+        {["all","expected","received"].map(v=>(
+          <button key={v} onClick={()=>setFilter(v)}
+            className={`px-3 py-1 rounded-full text-xs font-medium border ${filter===v?"bg-green-600 text-white border-green-600":"bg-white text-gray-600 border-gray-200 hover:border-green-300"}`}>
+            {v.charAt(0).toUpperCase()+v.slice(1)}
+          </button>
+        ))}
+        <select className="ml-2 text-xs border border-gray-200 rounded-lg px-2 py-1" value={selCat} onChange={e=>setSelCat(e.target.value)}>
+          <option value="all">All Categories</option>
+          {INCOME_CATS.map(c=><option key={c}>{c}</option>)}
+        </select>
+      </div>
+
+      {/* Income table */}
+      <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b text-left">
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Name</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Category</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Amount</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Frequency</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Expected</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Received</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Status</th>
+              <th className="px-4 py-2.5 font-semibold text-gray-600 text-xs">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(x=>(
+              <tr key={x.id} className="border-b last:border-0 hover:bg-gray-50">
+                <td className="px-4 py-2.5">
+                  <div className="font-medium text-gray-800">{x.name}</div>
+                  {x.notes && <div className="text-xs text-gray-400">{x.notes}</div>}
+                </td>
+                <td className="px-4 py-2.5 text-gray-600">{x.category}</td>
+                <td className="px-4 py-2.5 font-semibold text-green-700">{fmt(x.amount)}</td>
+                <td className="px-4 py-2.5 text-gray-600 capitalize">{x.freq}</td>
+                <td className="px-4 py-2.5 text-gray-600">{x.expectedDate?fd(x.expectedDate):"—"}</td>
+                <td className="px-4 py-2.5 text-gray-600">{x.receivedDate?fd(x.receivedDate):"—"}</td>
+                <td className="px-4 py-2.5">
+                  <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${x.status==="received"?"bg-green-100 text-green-700":"bg-amber-100 text-amber-700"}`}>
+                    {x.status==="received"?"✓ Received":"⏳ Expected"}
+                  </span>
+                </td>
+                <td className="px-4 py-2.5">
+                  <div className="flex gap-1.5">
+                    {x.status==="expected" && (
+                      <button className="text-xs bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 px-2 py-1 rounded-lg font-medium" onClick={()=>markReceived(x)}>
+                        Mark Received
+                      </button>
+                    )}
+                    <button className="text-xs bg-gray-50 hover:bg-gray-100 text-gray-600 border border-gray-200 px-2 py-1 rounded-lg" onClick={()=>{setForm({...x});setShowForm(true);}}>Edit</button>
+                    <button className="text-xs bg-red-50 hover:bg-red-100 text-red-500 border border-red-100 px-2 py-1 rounded-lg" onClick={()=>del(x.id)}>✕</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {filtered.length===0 && (
+              <tr><td colSpan="8" className="text-center text-gray-400 py-10 text-sm">No income sources found. Click "Add Income Source" to get started.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   SETTINGS
+═══════════════════════════════════ */
+function Settings({categories,setCategories}) {
+  const [nc,setNc]=useState("");
+  const add=()=>{if(nc.trim()&&!categories.includes(nc.trim())){setCategories(p=>[...p,nc.trim()]);setNc("");}};
+  const del=c=>{if(!DEF_CATS.includes(c))setCategories(p=>p.filter(x=>x!==c));};
+  const clear=()=>{if(confirm("Delete ALL data? This cannot be undone.")){Object.keys(localStorage).filter(k=>k.startsWith("ft_")).forEach(k=>localStorage.removeItem(k));window.location.reload();}};
+  return (
+    <div>
+      <h1 className="text-xl font-bold text-gray-800 mb-5">Settings</h1>
+      <div className="bg-white rounded-xl border shadow-sm p-5 mb-5">
+        <h3 className="font-semibold text-gray-700 text-sm mb-3">Expense Categories</h3>
+        <div className="flex gap-2 mb-3">
+          <input className={`${inp} max-w-xs`} value={nc} onChange={e=>setNc(e.target.value)} placeholder="New category name" onKeyDown={e=>e.key==="Enter"&&add()}/>
+          <button className={btnP} onClick={add}>Add</button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {categories.map(c=>(
+            <span key={c} className="bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm flex items-center gap-1.5">
+              {c}{!DEF_CATS.includes(c)&&<button className="text-red-400 hover:text-red-600 text-xs" onClick={()=>del(c)}>✕</button>}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5 mb-5">
+        <h3 className="font-semibold text-gray-700 text-sm mb-3">Auto-Categorization Rules</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {Object.entries(AUTO_RULES).map(([k,v])=>(
+            <div key={k} className="flex items-center gap-1.5 text-xs bg-gray-50 rounded-lg px-2.5 py-2">
+              <span className="font-mono text-indigo-600">{k}</span>
+              <span className="text-gray-400">→</span>
+              <span className="text-gray-600">{v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="bg-white rounded-xl border shadow-sm p-5">
+        <h3 className="font-semibold text-gray-700 text-sm mb-2">Data</h3>
+        <p className="text-xs text-gray-400 mb-3">All data is stored in your browser's localStorage — nothing leaves your device.</p>
+        <button className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-xs font-medium" onClick={clear}>Clear All Data</button>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   ROOT APP
+═══════════════════════════════════ */
+function App() {
+  const [page,setPage]=useState("dashboard");
+  const [col,setCol]=useState(false);
+  const [accounts,setAccounts]=useState(()=>ls("accounts",[]));
+  const [cards,setCards]=useState(()=>ls("cards",[]));
+  const [investments,setInvestments]=useState(()=>ls("investments",{shares:[],mutualFunds:[],insurance:[]}));
+  const [subscriptions,setSubscriptions]=useState(()=>ls("subscriptions",[]));
+  const [bills,setBills]=useState(()=>ls("bills",[]));
+  const [income,setIncome]=useState(()=>ls("income",[]));
+  const [categories,setCategories]=useState(()=>ls("categories",[...DEF_CATS]));
+
+  useEffect(()=>{ss("accounts",accounts);},[accounts]);
+  useEffect(()=>{ss("cards",cards);},[cards]);
+  useEffect(()=>{ss("investments",investments);},[investments]);
+  useEffect(()=>{ss("subscriptions",subscriptions);},[subscriptions]);
+  useEffect(()=>{ss("bills",bills);},[bills]);
+  useEffect(()=>{ss("income",income);},[income]);
+  useEffect(()=>{ss("categories",categories);},[categories]);
+
+  const p={accounts,setAccounts,cards,setCards,investments,setInvestments,subscriptions,setSubscriptions,bills,setBills,income,setIncome,categories,setCategories};
+
+  return (
+    <div style={{display:"flex",minHeight:"100vh"}}>
+      <Sidebar page={page} setPage={setPage} collapsed={col} setCollapsed={setCol}/>
+      <main style={{flex:1,overflowY:"auto",maxHeight:"100vh"}} className="p-6">
+        {page==="dashboard"     && <Dashboard {...p}/>}
+        {page==="accounts"      && <BankAccounts {...p}/>}
+        {page==="cards"         && <CreditCards {...p}/>}
+        {page==="transactions"  && <Transactions {...p}/>}
+        {page==="investments"   && <Investments {...p}/>}
+        {page==="insurance"     && <Insurance {...p}/>}
+        {page==="subscriptions" && <Subscriptions {...p}/>}
+        {page==="bills"         && <Bills {...p}/>}
+        {page==="income"        && <Income {...p}/>}
+        {page==="upload"        && <UploadStatement {...p}/>}
+        {page==="reports"       && <Reports {...p}/>}
+        {page==="settings"      && <Settings {...p}/>}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

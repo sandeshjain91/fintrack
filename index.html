@@ -321,7 +321,7 @@ function AuthScreen({onAuth}) {
             {mode==="signup" && (
               <div>
                 <label className={lbl}>Full Name</label>
-                <input className={inp} placeholder="Sandesh Jain" value={name} onChange={e=>setName(e.target.value)} required/>
+                <input className={inp} placeholder="Your full name" value={name} onChange={e=>setName(e.target.value)} required/>
               </div>
             )}
             <div>
@@ -351,11 +351,6 @@ function AuthScreen({onAuth}) {
           </div>
         </div>
 
-        {/* Trial info */}
-        <div className="mt-6 bg-white/10 border border-white/20 rounded-xl p-4 text-center">
-          <div className="text-white font-semibold text-sm mb-1">🎉 6 Months Free Trial</div>
-          <div className="text-slate-300 text-xs">Full access for 180 days, then ₹{SUB_PRICE}/year</div>
-        </div>
         {!auth && (
           <div className="mt-3 bg-amber-500/20 border border-amber-500/40 rounded-xl p-3 text-center">
             <div className="text-amber-300 text-xs font-medium">⚠️ Firebase not configured</div>

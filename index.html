@@ -9,19 +9,94 @@
   <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Firebase v9 Compat SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
   <style>
     *{box-sizing:border-box}
     body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc}
     ::-webkit-scrollbar{width:5px;height:5px}
     ::-webkit-scrollbar-track{background:#f1f5f9}
     ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+    @media print{.no-print{display:none!important}.print-break{page-break-after:always}}
   </style>
 </head>
 <body>
+<!-- ═══════════════════════════════════════════════════════════
+     FIREBASE SETUP
+     ⚠️  Fill in your Firebase project config below.
+     Steps:
+       1. Go to https://console.firebase.google.com
+       2. Create a project → Add a Web App
+       3. Copy the config object here
+       4. Enable Email/Password in Authentication → Sign-in method
+       5. Enable Firestore Database (start in production mode)
+       6. Set Firestore rules (see README comment below)
+     ═══════════════════════════════════════════════════════════ -->
+<!--
+  Recommended Firestore Security Rules:
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /users/{userId}/{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+      match /feedback/{docId} {
+        allow create: if request.auth != null;
+        allow read: if false;
+      }
+    }
+  }
+-->
+<script>
+  // ⚠️ REPLACE with your actual Firebase config
+  const FIREBASE_CONFIG = {
+    apiKey:            "AIzaSyDRMof89b4D_4kGNgFxbx5y3slVH4y_b14",
+    authDomain:        "fintracker-a6956.firebaseapp.com",
+    projectId:         "fintracker-a6956",
+    storageBucket:     "fintracker-a6956.firebasestorage.app",
+    messagingSenderId: "361480524937",
+    appId:             "1:361480524937:web:48a54919159d8bac8fe258"
+  };
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    window._db   = firebase.firestore();
+    window._auth = firebase.auth();
+    console.log("✅ Firebase initialised");
+  } catch(e) {
+    console.warn("⚠️ Firebase not configured — running in offline/localStorage mode:", e.message);
+    window._db   = null;
+    window._auth = null;
+  }
+</script>
 <div id="root"></div>
 <script type="text/babel">
 
-const {useState, useEffect, useMemo} = React;
+const {useState, useEffect, useMemo, useRef, useCallback} = React;
+
+/* ─── Firebase refs (set by init script above) ─── */
+const db   = window._db;
+const auth = window._auth;
+
+/* ─── Subscription constants ─── */
+const TRIAL_DAYS = 180;           // 6 months free
+const SUB_PRICE  = 2499;          // ₹2499/year
+const SUB_YEARS  = 1;
+
+/* ─── CSV export helper ─── */
+const downloadCSV = (rows, cols, filename) => {
+  const hdr = cols.map(c=>c.l).join(",");
+  const body = rows.map(r => cols.map(c => {
+    const v = c.v ? c.v(r) : (r[c.k]??'');
+    return typeof v==="string" && v.includes(",") ? `"${v.replace(/"/g,'""')}"` : v;
+  }).join(",")).join("\n");
+  const blob = new Blob([hdr+"\n"+body], {type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || "export.csv";
+  a.click();
+};
 
 /* ─── Helpers ─── */
 const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#06b6d4","#84cc16"];
@@ -180,6 +255,284 @@ function Tag({children, color="gray"}) {
   return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${colors[color]||colors.gray}`}>{children}</span>;
 }
 
+/* ═══════════════════════════════════
+   LOADING SCREEN
+═══════════════════════════════════ */
+function LoadingScreen({msg="Loading…"}) {
+  return (
+    <div className="fixed inset-0 flex flex-col items-center justify-center bg-slate-900 z-50">
+      <div className="text-4xl mb-4 animate-pulse">💰</div>
+      <div className="text-white font-semibold text-lg mb-2">FinTracker</div>
+      <div className="text-slate-400 text-sm">{msg}</div>
+      <div className="mt-6 w-8 h-8 border-4 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   AUTH SCREEN (Login / Signup)
+═══════════════════════════════════ */
+function AuthScreen({onAuth}) {
+  const [mode,setMode]=useState("login"); // login | signup | reset
+  const [email,setEmail]=useState("");
+  const [pass,setPass]=useState("");
+  const [name,setName]=useState("");
+  const [err,setErr]=useState("");
+  const [info,setInfo]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  const handle=async(e)=>{
+    e.preventDefault(); setErr(""); setInfo(""); setBusy(true);
+    try {
+      if(!auth) throw new Error("Firebase not configured. Fill in FIREBASE_CONFIG in the HTML file.");
+      if(mode==="login"){
+        const r=await auth.signInWithEmailAndPassword(email,pass);
+        onAuth(r.user);
+      } else if(mode==="signup"){
+        if(!name.trim()) throw new Error("Please enter your name.");
+        const r=await auth.createUserWithEmailAndPassword(email,pass);
+        await r.user.updateProfile({displayName:name.trim()});
+        onAuth(r.user);
+      } else {
+        await auth.sendPasswordResetEmail(email);
+        setInfo("Password reset email sent! Check your inbox.");
+        setMode("login");
+      }
+    } catch(ex){ setErr(ex.message||"Something went wrong."); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        {/* Logo */}
+        <div className="text-center mb-8">
+          <div className="text-5xl mb-3">💰</div>
+          <h1 className="text-2xl font-bold text-white tracking-tight">FinTracker</h1>
+          <p className="text-slate-400 text-sm mt-1">Your personal finance command centre</p>
+        </div>
+
+        {/* Card */}
+        <div className="bg-white rounded-2xl shadow-2xl p-7">
+          <h2 className="text-lg font-bold text-gray-800 mb-5">
+            {mode==="login"?"Welcome back":mode==="signup"?"Create account":"Reset password"}
+          </h2>
+          <form onSubmit={handle} className="space-y-3">
+            {mode==="signup" && (
+              <div>
+                <label className={lbl}>Full Name</label>
+                <input className={inp} placeholder="Sandesh Jain" value={name} onChange={e=>setName(e.target.value)} required/>
+              </div>
+            )}
+            <div>
+              <label className={lbl}>Email</label>
+              <input className={inp} type="email" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)} required/>
+            </div>
+            {mode!=="reset" && (
+              <div>
+                <label className={lbl}>Password</label>
+                <input className={inp} type="password" placeholder={mode==="signup"?"Min 6 characters":"••••••••"} value={pass} onChange={e=>setPass(e.target.value)} required minLength={6}/>
+              </div>
+            )}
+            {err && <div className="bg-red-50 border border-red-200 text-red-600 text-xs rounded-lg px-3 py-2">{err}</div>}
+            {info && <div className="bg-green-50 border border-green-200 text-green-700 text-xs rounded-lg px-3 py-2">{info}</div>}
+            <button type="submit" disabled={busy} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-lg transition text-sm disabled:opacity-60">
+              {busy?"Please wait…":mode==="login"?"Sign In":mode==="signup"?"Create Account":"Send Reset Email"}
+            </button>
+          </form>
+
+          <div className="mt-4 space-y-2 text-center text-xs text-gray-500">
+            {mode==="login" && <>
+              <button onClick={()=>{setMode("signup");setErr("");}} className="text-indigo-600 hover:underline">Don't have an account? Sign up free</button>
+              <div><button onClick={()=>{setMode("reset");setErr("");}} className="text-gray-400 hover:text-gray-600">Forgot password?</button></div>
+            </>}
+            {mode==="signup" && <button onClick={()=>{setMode("login");setErr("");}} className="text-indigo-600 hover:underline">Already have an account? Sign in</button>}
+            {mode==="reset" && <button onClick={()=>{setMode("login");setErr("");}} className="text-indigo-600 hover:underline">Back to sign in</button>}
+          </div>
+        </div>
+
+        {/* Trial info */}
+        <div className="mt-6 bg-white/10 border border-white/20 rounded-xl p-4 text-center">
+          <div className="text-white font-semibold text-sm mb-1">🎉 6 Months Free Trial</div>
+          <div className="text-slate-300 text-xs">Full access for 180 days, then ₹{SUB_PRICE}/year</div>
+        </div>
+        {!auth && (
+          <div className="mt-3 bg-amber-500/20 border border-amber-500/40 rounded-xl p-3 text-center">
+            <div className="text-amber-300 text-xs font-medium">⚠️ Firebase not configured</div>
+            <div className="text-amber-400/70 text-xs mt-0.5">Fill in FIREBASE_CONFIG in the HTML file to enable login.</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   SUBSCRIPTION WALL
+═══════════════════════════════════ */
+function SubscriptionWall({user, onLogout, onPaid}) {
+  const [txnId,setTxnId]=useState("");
+  const [step,setStep]=useState("info"); // info | pay | confirm
+  const [busy,setBusy]=useState(false);
+  const [done,setDone]=useState(false);
+
+  const submitPayment=async()=>{
+    if(!txnId.trim()){alert("Please enter your transaction/UPI reference ID.");return;}
+    setBusy(true);
+    await onPaid(txnId.trim());
+    setBusy(false);
+    setDone(true);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <div className="text-5xl mb-3">🔐</div>
+          <h1 className="text-2xl font-bold text-white">Trial Ended</h1>
+          <p className="text-slate-400 text-sm mt-1">{user?.email}</p>
+        </div>
+
+        {done ? (
+          <div className="bg-white rounded-2xl p-7 text-center">
+            <div className="text-4xl mb-3">🙏</div>
+            <h2 className="text-lg font-bold text-gray-800 mb-2">Payment Recorded!</h2>
+            <p className="text-gray-500 text-sm">Your reference ID has been submitted. We'll activate your account within 24 hours and notify you at <strong>{user?.email}</strong>.</p>
+            <button onClick={onLogout} className="mt-5 text-sm text-gray-400 hover:text-gray-600 underline">Sign out</button>
+          </div>
+        ) : (
+          <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
+            {/* Pricing card */}
+            <div className="bg-gradient-to-r from-indigo-600 to-purple-600 p-6 text-white text-center">
+              <div className="text-sm font-medium opacity-80 mb-1">Upgrade to continue</div>
+              <div className="text-4xl font-bold mb-1">₹{SUB_PRICE}<span className="text-lg font-normal opacity-80">/year</span></div>
+              <div className="text-sm opacity-75">That's just ₹{Math.round(SUB_PRICE/12)}/month</div>
+            </div>
+
+            <div className="p-6">
+              <div className="space-y-2.5 mb-5">
+                {["Unlimited bank accounts & cards","Cloud sync across devices","Statement import & auto-categorisation","Investment & insurance tracking","Bills, EMI & income management","Full reports & CSV export","Priority email support"].map(f=>(
+                  <div key={f} className="flex items-center gap-2 text-sm text-gray-700">
+                    <span className="text-green-500 font-bold flex-shrink-0">✓</span>{f}
+                  </div>
+                ))}
+              </div>
+
+              {step==="info" && (
+                <div className="space-y-3">
+                  <button onClick={()=>setStep("pay")} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition">
+                    Pay ₹{SUB_PRICE} &amp; Activate
+                  </button>
+                  <button onClick={onLogout} className="w-full text-sm text-gray-400 hover:text-gray-600 py-2">Sign out</button>
+                </div>
+              )}
+
+              {step==="pay" && (
+                <div className="space-y-4">
+                  <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 text-center">
+                    <div className="text-sm font-semibold text-gray-700 mb-2">Pay via UPI / Bank Transfer</div>
+                    <div className="text-lg font-bold text-indigo-700 mb-1">UPI: fintracker@upi</div>
+                    <div className="text-xs text-gray-500">Amount: ₹{SUB_PRICE} · Name: FinTracker Pro</div>
+                    <div className="mt-2 text-xs text-gray-400">(Update UPI ID in HTML before going live)</div>
+                  </div>
+                  <div>
+                    <label className={lbl}>Enter UPI / Bank Reference ID after payment</label>
+                    <input className={inp} placeholder="e.g. UPI/123456789012 or txn ref" value={txnId} onChange={e=>setTxnId(e.target.value)}/>
+                  </div>
+                  <button onClick={submitPayment} disabled={busy} className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition disabled:opacity-60">
+                    {busy?"Submitting…":"I've Paid — Submit Reference ID"}
+                  </button>
+                  <button onClick={()=>setStep("info")} className="w-full text-sm text-gray-400 hover:text-gray-600 py-1">← Back</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════
+   FEEDBACK MODAL
+═══════════════════════════════════ */
+function FeedbackModal({user, onClose}) {
+  const [msg,setMsg]=useState("");
+  const [rating,setRating]=useState(5);
+  const [type,setType]=useState("general");
+  const [busy,setBusy]=useState(false);
+  const [sent,setSent]=useState(false);
+
+  const submit=async()=>{
+    if(!msg.trim()){alert("Please enter your feedback.");return;}
+    setBusy(true);
+    try {
+      if(db) {
+        await db.collection("feedback").add({
+          uid: user?.uid||"anon",
+          email: user?.email||"",
+          type, rating, message: msg,
+          createdAt: new Date().toISOString()
+        });
+      }
+      setSent(true);
+    } catch(e){ alert("Failed to send. Please try again."); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{background:"rgba(0,0,0,.5)"}} onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <h2 className="text-base font-semibold text-gray-800">💬 Send Feedback</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100">&times;</button>
+        </div>
+        <div className="px-6 py-5">
+          {sent ? (
+            <div className="text-center py-4">
+              <div className="text-4xl mb-3">🙏</div>
+              <div className="font-semibold text-gray-800 mb-1">Thank you!</div>
+              <div className="text-sm text-gray-500 mb-4">Your feedback helps us improve FinTracker.</div>
+              <button className={btnP} onClick={onClose}>Close</button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div>
+                <label className={lbl}>Type</label>
+                <div className="flex gap-2 flex-wrap">
+                  {["general","bug","feature","billing","other"].map(t=>(
+                    <button key={t} onClick={()=>setType(t)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-medium border transition capitalize ${type===t?"bg-indigo-600 text-white border-indigo-600":"bg-gray-50 text-gray-600 border-gray-200 hover:border-indigo-300"}`}>
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className={lbl}>Rating</label>
+                <div className="flex gap-1">
+                  {[1,2,3,4,5].map(n=>(
+                    <button key={n} onClick={()=>setRating(n)} className={`text-2xl transition ${n<=rating?"opacity-100":"opacity-30"}`}>⭐</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className={lbl}>Your feedback</label>
+                <textarea className={inp+" resize-none"} rows={4} placeholder="Tell us what you think, what's missing, or what's broken…" value={msg} onChange={e=>setMsg(e.target.value)}/>
+              </div>
+              <div className="text-xs text-gray-400">Sent as: {user?.email||"anonymous"}</div>
+              <div className="flex gap-2">
+                <button className={btnP} onClick={submit} disabled={busy}>{busy?"Sending…":"Send Feedback"}</button>
+                <button className={btnS} onClick={onClose}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── NAV ─── */
 const NAV=[
   {id:"dashboard",l:"Dashboard",i:"📊"},{id:"accounts",l:"Bank Accounts",i:"🏦"},
@@ -191,16 +544,32 @@ const NAV=[
   {id:"reports",l:"Reports",i:"📑"},{id:"settings",l:"Settings",i:"⚙️"},
 ];
 
-function Sidebar({page, setPage, collapsed, setCollapsed}) {
+function Sidebar({page, setPage, collapsed, setCollapsed, user, subStatus, onFeedback, onLogout}) {
+  const daysLeft = subStatus?.daysLeft;
   return (
-    <div className={`bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-200 ${collapsed?"w-14":"w-56"}`} style={{minHeight:"100vh"}}>
+    <div className={`bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-200 no-print ${collapsed?"w-14":"w-56"}`} style={{minHeight:"100vh"}}>
+      {/* Logo */}
       <div className="flex items-center gap-2 px-3 py-4 border-b border-slate-800">
         {!collapsed && <span className="font-bold text-sm tracking-tight text-white">💰 FinTracker</span>}
         <button onClick={()=>setCollapsed(!collapsed)} className="ml-auto text-slate-400 hover:text-white text-base w-7 h-7 flex items-center justify-center rounded hover:bg-slate-800">
           {collapsed?"›":"‹"}
         </button>
       </div>
-      <nav className="flex-1 py-2">
+
+      {/* Trial badge */}
+      {!collapsed && subStatus?.status==="trial" && daysLeft!=null && daysLeft<=45 && (
+        <div className="mx-2 mt-2 bg-amber-500/20 border border-amber-500/30 rounded-lg px-2.5 py-1.5 text-xs text-amber-300">
+          ⏳ Trial: {daysLeft} day{daysLeft!==1?"s":""} left
+        </div>
+      )}
+      {!collapsed && subStatus?.status==="active" && (
+        <div className="mx-2 mt-2 bg-green-500/20 border border-green-500/30 rounded-lg px-2.5 py-1.5 text-xs text-green-300">
+          ✓ Pro Plan Active
+        </div>
+      )}
+
+      {/* Nav links */}
+      <nav className="flex-1 py-2 overflow-y-auto">
         {NAV.map(n=>(
           <button key={n.id} onClick={()=>setPage(n.id)}
             className={`w-full flex items-center gap-3 px-3 py-2.5 text-sm transition ${page===n.id?"bg-indigo-600/25 text-indigo-300 border-r-2 border-indigo-400":"text-slate-400 hover:text-white hover:bg-slate-800"}`}>
@@ -209,6 +578,26 @@ function Sidebar({page, setPage, collapsed, setCollapsed}) {
           </button>
         ))}
       </nav>
+
+      {/* Bottom: Feedback + User + Logout */}
+      <div className="border-t border-slate-800 p-2 space-y-1">
+        <button onClick={onFeedback}
+          className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">
+          <span className="text-base flex-shrink-0">💬</span>
+          {!collapsed && <span>Send Feedback</span>}
+        </button>
+        {!collapsed && user && (
+          <div className="px-3 py-1">
+            <div className="text-xs text-slate-500 truncate">{user.displayName||user.email}</div>
+            {user.email&&user.displayName&&<div className="text-xs text-slate-600 truncate">{user.email}</div>}
+          </div>
+        )}
+        <button onClick={onLogout}
+          className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition">
+          <span className="text-base flex-shrink-0">🚪</span>
+          {!collapsed && <span>Sign Out</span>}
+        </button>
+      </div>
     </div>
   );
 }
@@ -583,12 +972,20 @@ function CreditCards({cards,setCards,categories}) {
 /* ═══════════════════════════════════
    ALL TRANSACTIONS
 ═══════════════════════════════════ */
-function Transactions({accounts,cards,categories}) {
-  const [q,setQ]=useState(""); const [cat,setCat]=useState(""); const [src,setSrc]=useState(""); const [df,setDf]=useState(""); const [dt,setDt]=useState("");
+function Transactions({accounts,setAccounts,cards,setCards,categories}) {
+  const [q,setQ]=useState("");
+  const [cat,setCat]=useState("");
+  const [src,setSrc]=useState("");
+  const [df,setDf]=useState("");
+  const [dt,setDt]=useState("");
+  const [showForm,setShowForm]=useState(false);
+  const [form,setForm]=useState({type:"debit",date:tod(),category:"Miscellaneous"});
+
   const all = useMemo(()=>[
-    ...accounts.flatMap(a=>(a.transactions||[]).map(t=>({...t,source:a.nickname||a.bankName,sType:"Bank"}))),
-    ...cards.flatMap(c=>(c.transactions||[]).map(t=>({...t,source:c.cardName||c.bankName,sType:"Card"})))
-  ].sort((a,b)=>b.date.localeCompare(a.date)),[accounts,cards]);
+    ...accounts.flatMap(a=>(a.transactions||[]).map(t=>({...t,source:a.nickname||a.bankName,sType:"Bank",_aid:a.id}))),
+    ...cards.flatMap(c=>(c.transactions||[]).map(t=>({...t,source:c.cardName||c.bankName,sType:"Card",_cid:c.id})))
+  ].sort((a,b)=>(b.date||"").localeCompare(a.date||"")),[accounts,cards]);
+
   const filtered=all.filter(t=>{
     if(q && !t.description?.toLowerCase().includes(q.toLowerCase())&&!t.source?.toLowerCase().includes(q.toLowerCase())) return false;
     if(cat&&t.category!==cat) return false;
@@ -597,26 +994,151 @@ function Transactions({accounts,cards,categories}) {
     if(dt&&t.date>dt) return false;
     return true;
   });
+
   const sources=[...new Set(all.map(t=>t.source))];
+
+  const deleteTxn=(t)=>{
+    if(!confirm("Delete this transaction? This cannot be undone.")) return;
+    if(t._aid) setAccounts(p=>p.map(a=>a.id===t._aid?{...a,transactions:(a.transactions||[]).filter(x=>x.id!==t.id)}:a));
+    else if(t._cid) setCards(p=>p.map(c=>c.id===t._cid?{...c,transactions:(c.transactions||[]).filter(x=>x.id!==t.id)}:c));
+  };
+
+  const saveTxn=()=>{
+    if(!form.description||!form.accountId||!form.amount) return;
+    const t={
+      id:uid(), date:form.date||tod(),
+      description:form.description,
+      debit: form.type==="debit"?parseFloat(form.amount)||0:0,
+      credit:form.type==="credit"?parseFloat(form.amount)||0:0,
+      category:form.category||"Miscellaneous",
+      notes:form.notes||"Manual entry",
+    };
+    const [sType,aId]=form.accountId.split("|");
+    if(sType==="a") setAccounts(p=>p.map(a=>a.id===aId?{...a,transactions:[...(a.transactions||[]),t]}:a));
+    else            setCards(p=>p.map(c=>c.id===aId?{...c,transactions:[...(c.transactions||[]),t]}:c));
+    setShowForm(false);
+    setForm({type:"debit",date:tod(),category:"Miscellaneous"});
+  };
+
+  const exportCSV=()=>downloadCSV(filtered,[
+    {l:"Date",k:"date"},{l:"Account",k:"source"},{l:"Type",k:"sType"},
+    {l:"Description",k:"description"},{l:"Category",k:"category"},
+    {l:"Debit",k:"debit",v:r=>r.debit||0},{l:"Credit",k:"credit",v:r=>r.credit||0},
+  ],`transactions_${tod()}.csv`);
+
   return (
     <div>
-      <h1 className="text-xl font-bold text-gray-800 mb-5">All Transactions</h1>
-      <div className="bg-white rounded-xl border shadow-sm p-4 mb-5 grid grid-cols-2 md:grid-cols-5 gap-2">
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-xl font-bold text-gray-800">All Transactions</h1>
+        <div className="flex gap-2">
+          <button className={btnS} onClick={exportCSV}>⬇ Export CSV</button>
+          <button className={btnP} onClick={()=>{setForm({type:"debit",date:tod(),category:"Miscellaneous"});setShowForm(true);}}>+ Add Transaction</button>
+        </div>
+      </div>
+
+      {/* Filter bar */}
+      <div className="bg-white rounded-xl border shadow-sm p-4 mb-4 grid grid-cols-2 md:grid-cols-5 gap-2">
         <input className={inp} placeholder="🔍 Search…" value={q} onChange={e=>setQ(e.target.value)}/>
-        <select className={inp} value={cat} onChange={e=>setCat(e.target.value)}><option value="">All Categories</option>{categories.map(c=><option key={c}>{c}</option>)}</select>
-        <select className={inp} value={src} onChange={e=>setSrc(e.target.value)}><option value="">All Accounts</option>{sources.map(s=><option key={s}>{s}</option>)}</select>
+        <select className={inp} value={cat} onChange={e=>setCat(e.target.value)}>
+          <option value="">All Categories</option>
+          {categories.map(c=><option key={c}>{c}</option>)}
+        </select>
+        <select className={inp} value={src} onChange={e=>setSrc(e.target.value)}>
+          <option value="">All Accounts</option>
+          {sources.map(s=><option key={s}>{s}</option>)}
+        </select>
         <input type="date" className={inp} value={df} onChange={e=>setDf(e.target.value)}/>
         <input type="date" className={inp} value={dt} onChange={e=>setDt(e.target.value)}/>
       </div>
+
+      {/* Add Transaction Form */}
+      {showForm && (
+        <div className="bg-white rounded-xl border shadow-sm p-5 mb-4">
+          <h3 className="font-semibold text-gray-700 text-sm mb-4">Add Transaction</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-3">
+            <div>
+              <label className={lbl}>Date</label>
+              <input className={inp} type="date" value={form.date||tod()} onChange={e=>setForm(p=>({...p,date:e.target.value}))}/>
+            </div>
+            <div className="col-span-2">
+              <label className={lbl}>Description</label>
+              <input className={inp} placeholder="e.g. Swiggy, Petrol" value={form.description||""} onChange={e=>setForm(p=>({...p,description:e.target.value}))}/>
+            </div>
+            <div>
+              <label className={lbl}>Type</label>
+              <select className={inp} value={form.type} onChange={e=>setForm(p=>({...p,type:e.target.value}))}>
+                <option value="debit">Debit (Expense)</option>
+                <option value="credit">Credit (Income)</option>
+              </select>
+            </div>
+            <div>
+              <label className={lbl}>Amount (₹)</label>
+              <input className={inp} type="number" min="0" placeholder="0" value={form.amount||""} onChange={e=>setForm(p=>({...p,amount:e.target.value}))}/>
+            </div>
+            <div>
+              <label className={lbl}>Category</label>
+              <select className={inp} value={form.category||"Miscellaneous"} onChange={e=>setForm(p=>({...p,category:e.target.value}))}>
+                {categories.map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className={lbl}>Account / Card</label>
+              <select className={inp} value={form.accountId||""} onChange={e=>setForm(p=>({...p,accountId:e.target.value}))}>
+                <option value="">— Select account —</option>
+                {accounts.map(a=><option key={a.id} value={"a|"+a.id}>{a.bankName}{a.nickname?" ("+a.nickname+")":""}</option>)}
+                {cards.map(c=><option key={c.id} value={"c|"+c.id}>{c.cardName} (Card)</option>)}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className={lbl}>Notes (optional)</label>
+              <input className={inp} placeholder="e.g. Weekend trip" value={form.notes||""} onChange={e=>setForm(p=>({...p,notes:e.target.value}))}/>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button className={btnP} onClick={saveTxn}>Save Transaction</button>
+            <button className={btnS} onClick={()=>setShowForm(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
       <div className="bg-white rounded-xl border shadow-sm p-5">
-        <div className="text-xs text-gray-400 mb-3">{filtered.length} transactions</div>
-        <Table cols={[
-          {k:"date",l:"Date",r:r=>fd(r.date)},
-          {k:"source",l:"Account",r:r=><Tag color={r.sType==="Card"?"purple":"blue"}>{r.source}</Tag>},
-          {k:"description",l:"Description"},{k:"category",l:"Category",r:r=><Tag>{r.category}</Tag>},
-          {k:"debit",l:"Debit",r:r=>r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""},
-          {k:"credit",l:"Credit",r:r=>r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""},
-        ]} rows={filtered} empty="No transactions match filters"/>
+        <div className="flex justify-between items-center mb-3">
+          <div className="text-xs text-gray-400">{filtered.length} transactions</div>
+          <div className="text-xs text-gray-400">
+            Total debit: <span className="text-red-500 font-medium">{fmt(filtered.reduce((s,t)=>s+(t.debit||0),0))}</span>
+            {" · "}Total credit: <span className="text-green-600 font-medium">{fmt(filtered.reduce((s,t)=>s+(t.credit||0),0))}</span>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="border-b border-gray-100">
+              <th className="text-left py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Date</th>
+              <th className="text-left py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Account</th>
+              <th className="text-left py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Description</th>
+              <th className="text-left py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Category</th>
+              <th className="text-right py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Debit</th>
+              <th className="text-right py-2.5 px-3 text-xs text-gray-500 font-semibold uppercase">Credit</th>
+              <th className="py-2.5 px-3"></th>
+            </tr></thead>
+            <tbody>
+              {filtered.map((r,i)=>(
+                <tr key={r.id||i} className="border-b border-gray-50 hover:bg-gray-50 transition group">
+                  <td className="py-2.5 px-3 text-gray-500 text-xs whitespace-nowrap">{fd(r.date)}</td>
+                  <td className="py-2.5 px-3"><Tag color={r.sType==="Card"?"purple":"blue"}>{r.source}</Tag></td>
+                  <td className="py-2.5 px-3 text-gray-700 max-w-xs truncate">{r.description}</td>
+                  <td className="py-2.5 px-3"><Tag>{r.category}</Tag></td>
+                  <td className="py-2.5 px-3 text-right">{r.debit?<span className="text-red-600 font-medium">{fmt(r.debit)}</span>:""}</td>
+                  <td className="py-2.5 px-3 text-right">{r.credit?<span className="text-green-600 font-medium">{fmt(r.credit)}</span>:""}</td>
+                  <td className="py-2.5 px-3">
+                    <button onClick={()=>deleteTxn(r)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition">✕</button>
+                  </td>
+                </tr>
+              ))}
+              {!filtered.length && <tr><td colSpan="7" className="text-center text-gray-400 py-10 text-sm">No transactions match the filters</td></tr>}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -1392,7 +1914,16 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
 
   return (
     <div>
-      <h1 className="text-xl font-bold text-gray-800 mb-4">Reports &amp; Analytics</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-bold text-gray-800">Reports &amp; Analytics</h1>
+        <div className="flex gap-2">
+          <button className={btnS} onClick={()=>window.print()} title="Print / Save as PDF">🖨 Print</button>
+          <button className={btnS} onClick={()=>downloadCSV(allT,[
+            {l:"Date",k:"date"},{l:"Description",k:"description"},{l:"Category",k:"category"},
+            {l:"Debit",k:"debit",v:r=>r.debit||0},{l:"Credit",k:"credit",v:r=>r.credit||0},
+          ],"all_transactions_"+tod()+".csv")}>⬇ All Transactions</button>
+        </div>
+      </div>
       <div className="flex flex-wrap gap-2 mb-6">
         {TABS.map(t=><TabBtn key={t.id} id={t.id} l={t.l}/>)}
       </div>
@@ -1400,6 +1931,12 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
       {/* ─── CASH FLOW ─── */}
       {tab==="cashflow" && (
         <div className="space-y-5">
+          <div className="flex justify-end mb-1">
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(trend12,[
+              {l:"Month",k:"name"},{l:"Income",k:"income"},{l:"Expenses",k:"expenses"},
+              {l:"Savings",v:r=>r.income-r.expenses,l2:"Savings"},{l:"Savings%",v:r=>r.income>0?((r.income-r.expenses)/r.income*100).toFixed(1):0}
+            ],"cashflow_"+tod()+".csv")}>⬇ Export CSV</button>
+          </div>
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <Card title="This Month Income" value={fmt(mInc)} icon="📥" grad="green"/>
             <Card title="This Month Expenses" value={fmt(mExp)} icon="📤" grad="red"/>
@@ -1449,6 +1986,11 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
       {/* ─── EXPENSES ─── */}
       {tab==="expenses" && (
         <div className="space-y-5">
+          <div className="flex justify-end mb-1">
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(allT.filter(t=>t.debit>0),[
+              {l:"Date",k:"date"},{l:"Description",k:"description"},{l:"Category",k:"category"},{l:"Amount",k:"debit",v:r=>r.debit||0}
+            ],"expenses_"+tod()+".csv")}>⬇ Export Expenses CSV</button>
+          </div>
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <Card title="This Month" value={fmt(mExp)} icon="📤" grad="red"/>
             <Card title="Avg Monthly (12m)" value={fmt(Math.round(trend12.reduce((s,r)=>s+r.expenses,0)/12))} icon="📊" grad="amber"/>
@@ -1525,6 +2067,12 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
       {/* ─── INCOME ─── */}
       {tab==="income_report" && (
         <div className="space-y-5">
+          <div className="flex justify-end mb-1">
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(incomeList,[
+              {l:"Name",k:"name"},{l:"Category",k:"category"},{l:"Amount",k:"amount",v:r=>r.amount||0},
+              {l:"Frequency",k:"freq"},{l:"Status",k:"status"},{l:"Expected Date",k:"expectedDate"},{l:"Received Date",k:"receivedDate"}
+            ],"income_"+tod()+".csv")}>⬇ Export Income CSV</button>
+          </div>
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <Card title="Monthly Expected" value={fmt(incMonthly)} icon="📅" grad="green"/>
             <Card title="Annual Expected" value={fmt(incMonthly*12)} icon="📆" grad="cyan"/>
@@ -1596,6 +2144,12 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
       {/* ─── BILLS & EMI ─── */}
       {tab==="bills_report" && (
         <div className="space-y-5">
+          <div className="flex justify-end mb-1">
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(billList,[
+              {l:"Name",k:"name"},{l:"Category",k:"category"},{l:"Amount",k:"amount",v:r=>r.amount||0},
+              {l:"Frequency",k:"freq"},{l:"Status",k:"status"},{l:"Due Date",k:"dueDate"},{l:"Paid Date",k:"paidDate"}
+            ],"bills_"+tod()+".csv")}>⬇ Export Bills CSV</button>
+          </div>
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <Card title="Monthly Bills" value={fmt(monthlyBills)} icon="🧾" grad="amber"/>
             <Card title="Annual Bills" value={fmt(monthlyBills*12)} icon="📆" grad="red"/>
@@ -1692,6 +2246,18 @@ function Reports({accounts,cards,investments,subscriptions,bills,income}) {
       {/* ─── INVESTMENTS ─── */}
       {tab==="investment" && (
         <div className="space-y-5">
+          <div className="flex justify-end gap-2 mb-1">
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(investments.shares,[
+              {l:"Symbol/Name",v:r=>r.symbol||r.name||""},{l:"Qty",k:"quantity",v:r=>r.quantity||0},
+              {l:"Buy Price",k:"purchasePrice",v:r=>r.purchasePrice||0},{l:"Current Price",v:r=>r.currentPrice||r.purchasePrice||0},
+              {l:"Value",v:r=>(r.currentPrice||r.purchasePrice)*r.quantity},{l:"P&L",v:r=>((r.currentPrice||r.purchasePrice)-r.purchasePrice)*r.quantity}
+            ],"shares_"+tod()+".csv")}>⬇ Shares CSV</button>
+            <button className={btnS+" text-xs"} onClick={()=>downloadCSV(investments.mutualFunds,[
+              {l:"Fund",k:"name"},{l:"Units",k:"units",v:r=>r.units||0},
+              {l:"Buy NAV",k:"purchaseNav",v:r=>r.purchaseNav||0},{l:"Current NAV",v:r=>r.currentNav||r.purchaseNav||0},
+              {l:"Value",v:r=>(r.currentNav||r.purchaseNav)*r.units},{l:"P&L",v:r=>((r.currentNav||r.purchaseNav)-r.purchaseNav)*r.units}
+            ],"mutualfunds_"+tod()+".csv")}>⬇ MF CSV</button>
+          </div>
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <Card title="Total Portfolio" value={fmt(invTotal)} icon="💼" grad="indigo"/>
             <Card title="Cost Basis" value={fmt(invCost)} icon="📥" grad="amber"/>
@@ -2177,7 +2743,7 @@ function Settings({categories,setCategories}) {
       </div>
       <div className="bg-white rounded-xl border shadow-sm p-5">
         <h3 className="font-semibold text-gray-700 text-sm mb-2">Data</h3>
-        <p className="text-xs text-gray-400 mb-3">All data is stored in your browser's localStorage — nothing leaves your device.</p>
+        <p className="text-xs text-gray-400 mb-3">{db?"Your data is synced to Firebase Firestore (cloud). It is encrypted in transit and protected by Firebase security rules.":"Running in offline mode — data is stored in your browser's localStorage."}</p>
         <button className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-xs font-medium" onClick={clear}>Clear All Data</button>
       </div>
     </div>
@@ -2188,29 +2754,160 @@ function Settings({categories,setCategories}) {
    ROOT APP
 ═══════════════════════════════════ */
 function App() {
+  /* ── Auth & app shell state ── */
+  const [authState,setAuthState]=useState("loading"); // loading | authed | unauthed
+  const [user,setUser]=useState(null);
+  const [profile,setProfile]=useState(null);
+  const [dataLoaded,setDataLoaded]=useState(false);
   const [page,setPage]=useState("dashboard");
   const [col,setCol]=useState(false);
-  const [accounts,setAccounts]=useState(()=>ls("accounts",[]));
-  const [cards,setCards]=useState(()=>ls("cards",[]));
-  const [investments,setInvestments]=useState(()=>ls("investments",{shares:[],mutualFunds:[],insurance:[]}));
-  const [subscriptions,setSubscriptions]=useState(()=>ls("subscriptions",[]));
-  const [bills,setBills]=useState(()=>ls("bills",[]));
-  const [income,setIncome]=useState(()=>ls("income",[]));
-  const [categories,setCategories]=useState(()=>ls("categories",[...DEF_CATS]));
+  const [showFeedback,setShowFeedback]=useState(false);
 
-  useEffect(()=>{ss("accounts",accounts);},[accounts]);
-  useEffect(()=>{ss("cards",cards);},[cards]);
-  useEffect(()=>{ss("investments",investments);},[investments]);
-  useEffect(()=>{ss("subscriptions",subscriptions);},[subscriptions]);
-  useEffect(()=>{ss("bills",bills);},[bills]);
-  useEffect(()=>{ss("income",income);},[income]);
-  useEffect(()=>{ss("categories",categories);},[categories]);
+  /* ── App data ── */
+  const [accounts,setAccounts]=useState([]);
+  const [cards,setCards]=useState([]);
+  const [investments,setInvestments]=useState({shares:[],mutualFunds:[],insurance:[]});
+  const [subscriptions,setSubscriptions]=useState([]);
+  const [bills,setBills]=useState([]);
+  const [income,setIncome]=useState([]);
+  const [categories,setCategories]=useState([...DEF_CATS]);
+
+  const saveTimer=useRef(null);
+
+  /* ── Load data from Firestore ── */
+  const loadData=useCallback(async(uid)=>{
+    try {
+      const snap=await db.collection("users").doc(uid).collection("appdata").doc("main").get();
+      if(snap.exists){
+        const d=snap.data();
+        setAccounts(d.accounts||[]);
+        setCards(d.cards||[]);
+        setInvestments(d.investments||{shares:[],mutualFunds:[],insurance:[]});
+        setSubscriptions(d.subscriptions||[]);
+        setBills(d.bills||[]);
+        setIncome(d.income||[]);
+        setCategories(d.categories||[...DEF_CATS]);
+      } else {
+        // First login — migrate any existing localStorage data
+        setAccounts(ls("accounts",[]));
+        setCards(ls("cards",[]));
+        setInvestments(ls("investments",{shares:[],mutualFunds:[],insurance:[]}));
+        setSubscriptions(ls("subscriptions",[]));
+        setBills(ls("bills",[]));
+        setIncome(ls("income",[]));
+        setCategories(ls("categories",[...DEF_CATS]));
+      }
+    } catch(e){ console.error("Load error:",e); }
+    setDataLoaded(true);
+  },[]);
+
+  /* ── Auth state listener ── */
+  useEffect(()=>{
+    if(!auth){
+      // No Firebase — pure localStorage mode
+      setUser({uid:"local",email:"local@device",displayName:"Local User"});
+      setProfile({subscriptionStatus:"trial",trialEndsAt:new Date(Date.now()+TRIAL_DAYS*86400000).toISOString()});
+      setAccounts(ls("accounts",[]));
+      setCards(ls("cards",[]));
+      setInvestments(ls("investments",{shares:[],mutualFunds:[],insurance:[]}));
+      setSubscriptions(ls("subscriptions",[]));
+      setBills(ls("bills",[]));
+      setIncome(ls("income",[]));
+      setCategories(ls("categories",[...DEF_CATS]));
+      setDataLoaded(true);
+      setAuthState("authed");
+      return;
+    }
+    const unsub=auth.onAuthStateChanged(async(u)=>{
+      if(u){
+        setUser(u);
+        // Load or create profile
+        const profRef=db.collection("users").doc(u.uid);
+        let profSnap=await profRef.get();
+        if(!profSnap.exists){
+          const trialEnd=new Date(Date.now()+TRIAL_DAYS*86400000).toISOString();
+          await profRef.set({email:u.email,displayName:u.displayName||"",createdAt:new Date().toISOString(),trialEndsAt:trialEnd,subscriptionStatus:"trial",subscriptionEndsAt:null});
+          profSnap=await profRef.get();
+        }
+        setProfile(profSnap.data());
+        await loadData(u.uid);
+        setAuthState("authed");
+      } else {
+        setUser(null);
+        setProfile(null);
+        setDataLoaded(false);
+        setAuthState("unauthed");
+      }
+    });
+    return unsub;
+  },[loadData]);
+
+  /* ── Debounced Firestore save ── */
+  useEffect(()=>{
+    if(!dataLoaded) return;
+    const data={accounts,cards,investments,subscriptions,bills,income,categories};
+    if(!db || !user || user.uid==="local"){
+      // localStorage fallback
+      ss("accounts",accounts); ss("cards",cards); ss("investments",investments);
+      ss("subscriptions",subscriptions); ss("bills",bills); ss("income",income); ss("categories",categories);
+      return;
+    }
+    if(saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(async()=>{
+      try {
+        await db.collection("users").doc(user.uid).collection("appdata").doc("main").set({...data,updatedAt:new Date().toISOString()});
+      } catch(e){ console.error("Save error:",e); }
+    },2000);
+  },[accounts,cards,investments,subscriptions,bills,income,categories,dataLoaded,user]);
+
+  /* ── Subscription check ── */
+  const subStatus=useMemo(()=>{
+    if(!profile) return {status:"trial",daysLeft:TRIAL_DAYS};
+    if(profile.subscriptionStatus==="active"){
+      const end=new Date(profile.subscriptionEndsAt||0);
+      if(end>new Date()) return {status:"active",endsAt:profile.subscriptionEndsAt};
+    }
+    const trialEnd=new Date(profile.trialEndsAt||Date.now()+TRIAL_DAYS*86400000);
+    const now=new Date();
+    if(trialEnd>now){
+      const daysLeft=Math.ceil((trialEnd-now)/86400000);
+      return {status:"trial",daysLeft};
+    }
+    return {status:"expired"};
+  },[profile]);
+
+  const handleLogout=()=>{
+    if(auth) auth.signOut();
+    else { setUser(null); setAuthState("unauthed"); }
+  };
+
+  const handlePaid=async(txnId)=>{
+    if(db&&user){
+      try {
+        const profRef=db.collection("users").doc(user.uid);
+        const snap=await profRef.get();
+        const existing=snap.data()?.pendingPayments||[];
+        await profRef.update({pendingPayments:[...existing,{txnId,amount:SUB_PRICE,date:new Date().toISOString()}]});
+      } catch(e){ console.error(e); }
+    }
+  };
+
+  /* ── Render states ── */
+  if(authState==="loading") return <LoadingScreen/>;
+  if(authState==="unauthed") return <AuthScreen onAuth={u=>{setUser(u);setAuthState("authed");}}/>;
+  if(!dataLoaded) return <LoadingScreen msg="Loading your data…"/>;
+  if(subStatus.status==="expired") return <SubscriptionWall user={user} onLogout={handleLogout} onPaid={handlePaid}/>;
 
   const p={accounts,setAccounts,cards,setCards,investments,setInvestments,subscriptions,setSubscriptions,bills,setBills,income,setIncome,categories,setCategories};
 
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar page={page} setPage={setPage} collapsed={col} setCollapsed={setCol}/>
+      {showFeedback && <FeedbackModal user={user} onClose={()=>setShowFeedback(false)}/>}
+      <Sidebar page={page} setPage={setPage} collapsed={col} setCollapsed={setCol}
+        user={user} subStatus={subStatus}
+        onFeedback={()=>setShowFeedback(true)}
+        onLogout={handleLogout}
+      />
       <main style={{flex:1,overflowY:"auto",maxHeight:"100vh"}} className="p-6">
         {page==="dashboard"     && <Dashboard {...p}/>}
         {page==="accounts"      && <BankAccounts {...p}/>}
